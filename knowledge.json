@@ -1,0 +1,75 @@
+{
+  "agence": "Komara Agency",
+  "pays": "Guinée 🇬🇳",
+  "ville": "Conakry",
+  "slogan": "Vision. Impact. Excellence.",
+  "mission": "Digitaliser les PME et grandes entreprises africaines grâce à l'IA et au design moderne.",
+  "description": "Komara Agency est une agence digitale premium basée à Conakry, Guinée. Nous transformons vos idées en résultats concrets : images IA, sites web, logos, chatbots et vidéos. Notre objectif : donner à votre marque une présence digitale qui impose le respect.",
+  "services": [
+    {
+      "nom": "Génération d'images IA 4K/8K",
+      "description": "Transformez vos idées en visuels professionnels ultra-réalistes. Idéal pour affiches, logos, packaging, visuels pub Facebook/Tiktok/Instagram.",
+      "prix": "À partir de 150.000 GNF",
+      "delai": "24h à 48h"
+    },
+    {
+      "nom": "Création de sites web",
+      "description": "Sites vitrines, e-commerce Shopify/WooCommerce, landing pages. 100% responsive, SEO optimisé, rapide et sécurisé.",
+      "prix": "À partir de 1.500.000 GNF",
+      "delai": "1 à 2 semaines"
+    },
+    {
+      "nom": "Création de logos et Identité de marque",
+      "description": "Logo unique + charte graphique + palette de couleurs. Nous créons une identité qui marque les esprits.",
+      "prix": "À partir de 100.000 GNF",
+      "delai": "2 à 3 jours"
+    },
+    {
+      "nom": "Chatbots IA Telegram & WhatsApp",
+      "description": "Automatisez votre service client. Le bot répond, prend des commandes, génère des devis et travaille 24/7 pour vous.",
+      "prix": "À partir de 300.000 GNF/mois",
+      "delai": "3 à 5 jours"
+    },
+    {
+      "nom": "Community Management & Publicité",
+      "description": "Gestion de vos pages Facebook, Instagram, Tiktok. Création de contenu + Lancement de pubs pour avoir des clients.",
+      "prix": "À partir de 500.000 GNF/mois",
+      "delai": "Contrat mensuel"
+    },
+    {
+      "nom": "Vidéos IA et Montage",
+      "description": "Création de vidéos courtes animées par IA pour vos pubs, Reels et Tiktok. Script + Voix + Sous-titres inclus.",
+      "prix": "Sur demande",
+      "delai": "3 à 7 jours"
+    },
+    {
+      "nom": "Formation IA pour Entreprises",
+      "description": "Formez vos équipes à utiliser ChatGPT, Gemini, Midjourney pour gagner 10h par semaine.",
+      "prix": "200.000 GNF/personne",
+      "delai": "1 journée"
+    }
+  ],
+  "pourquoi_nous": [
+    "Experts en IA et Design",
+    "Délais respectés et prix abordables pour l'Afrique",
+    "Support WhatsApp réactif 7j/7",
+    "Paiement Mobile Money, Orange Money, PayPal"
+  ],
+  "contact": {
+    "whatsapp": "+212701986219",
+    "whatsapp_lien": "https://wa.me/212701986219",
+    "email": "ndinekomara2442@gmail.com",
+    "portfolio": "https://ndinekomara2442-cmd.github.io/komara-agency-site/"
+    "adresse": "Conakry, République de Guinée"
+  },
+  "faq": [
+    {
+      "question": "Comment commander?",
+      "reponse": "Écrivez-nous sur WhatsApp +212701986219 ou décrivez votre projet ici. Nous vous envoyons un devis gratuit sous 2h."
+    },
+    {
+      "question": "Quels sont les moyens de paiement?",
+      "reponse": "Orange Money, MTN Money, Wave, Virement bancaire, PayPal."
+    }
+  ]
+}
