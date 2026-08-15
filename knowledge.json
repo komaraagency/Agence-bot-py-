@@ -1,0 +1,37 @@
+{
+  "agence": "Komara Agency",
+  "pays": "Guinée 🇬🇳",
+  "description": "Komara Agency est une agence digitale spécialisée dans la création d'images IA, de sites web, de logos et de chatbots pour les entreprises africaines.",
+  "services": [
+    {
+      "nom": "Génération d'images IA",
+      "description": "Transformez vos idées en images professionnelles 4K grâce à l'intelligence artificielle. Logos, affiches publicitaires, visuels pour réseaux sociaux.",
+      "prix": "Sur demande"
+    },
+    {
+      "nom": "Création de sites web",
+      "description": "Sites vitrines, e-commerce et applications web modernes et responsives, optimisés pour le référencement.",
+      "prix": "À partir de 150.000 GNF"
+    },
+    {
+      "nom": "Création de logos",
+      "description": "Logos professionnels uniques, reflétant l'identité de votre marque ou entreprise.",
+      "prix": "À partir de 100.000 GNF"
+    },
+    {
+      "nom": "Chatbots sur mesure",
+      "description": "Bots Telegram et WhatsApp pour automatiser votre service client, générer des leads et interagir avec vos clients 24/7.",
+      "prix": "À partir de 300.000 GNF/mois"
+    },
+    {
+      "nom": "Vidéo IA",
+      "description": "Génération de courtes vidéos animées par IA pour vos campagnes marketing et réseaux sociaux.",
+      "prix": "Sur demande"
+    }
+  ],
+  "contact": {
+    "whatsapp": "+212701986219",
+    "portfolio": "https://komara-agency.onrender.com"
+  },
+  "delais": "Selon le projet : logo 2-3 jours, site web 1-2 semaines, chatbot 3-5 jours."
+}
