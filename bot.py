@@ -3,7 +3,9 @@ import io
 import sys
 import json
 import base64
+import asyncio
 import threading
+from urllib.parse import quote
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import httpx
@@ -24,14 +26,24 @@ try:
         KNOWLEDGE = json.load(f)
     print(f"✅ knowledge.json chargé pour {KNOWLEDGE.get('agence')}")
 except Exception as e:
-    print(f"⚠️ Erreur knowledge.json: {e}")
-    KNOWLEDGE = None
+    # On échoue vite et clairement plutôt que de continuer avec KNOWLEDGE=None
+    # et planter plus tard sur un TypeError obscur (NoneType is not subscriptable)
+    sys.exit(f"ERREUR FATALE: knowledge.json invalide — {e}")
 
 menu_keyboard = [
     ["Vos services", "Tarifs", "Commander"],
     ["Portfolio", "Contact", "Vidéo IA"],
 ]
 reply_markup = ReplyKeyboardMarkup(menu_keyboard, resize_keyboard=True)
+
+async def safe_reply(update: Update, text: str):
+    """Le prompt Gemini demande du **gras** — on essaie en Markdown, et si Telegram
+    rejette la syntaxe (caractères non échappés dans un prix/texte), on retombe sur
+    du texte brut plutôt que de planter silencieusement sans répondre."""
+    try:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(text, reply_markup=reply_markup)
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -67,7 +79,7 @@ async def ask_gemini_with_knowledge(question: str) -> str:
         "- Cite le slogan 1 fois sur 3"
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"role": "user", "parts": [{"text": f"{system_prompt}\n\nQuestion du client: {question}"}]}],
         "generationConfig": {"temperature": 0.8, "maxOutputTokens": 1000},
@@ -103,18 +115,18 @@ async def genere(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ex: /genere affiche publicitaire pour Komara Agency")
         return
     await update.message.reply_text("Création de votre visuel IA en cours... ⏳ 20s")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": f"Image publicitaire 4k, style professionnel africain, pour entreprise: {prompt}"}]}], "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}}
+
+    # Gemini native image generation (gemini-2.5-flash-image) a un quota GRATUIT à zéro
+    # (erreur 429 immédiate). On utilise Pollinations.ai — gratuit, sans clé — comme le
+    # bot komara-video-agent. httpx est déjà async donc rien ne bloque l'event loop.
+    enhanced_prompt = f"Image publicitaire 4k, style professionnel africain, pour entreprise: {prompt}"
+    image_url = f"https://image.pollinations.ai/prompt/{quote(enhanced_prompt)}?width=1024&height=1024&nologo=true&seed={hash(prompt) % 100000}"
+
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=60.0)
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            response = await client.get(image_url, timeout=60.0)
         response.raise_for_status()
-        data = response.json()
-        image_data = next((p['inlineData']['data'] for p in data['candidates'][0]['content']['parts'] if 'inlineData' in p), None)
-        if not image_data:
-            await update.message.reply_text("Impossible de générer. Essayez une description plus simple.")
-            return
-        photo = io.BytesIO(base64.b64decode(image_data))
+        photo = io.BytesIO(response.content)
         photo.name = "komara_image.png"
         await update.message.reply_photo(photo, caption=f"Voici votre visuel: {prompt}\n\nVoulez-vous l'utiliser pour une pub? Contactez-nous.")
     except Exception as e:
@@ -137,16 +149,32 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reponse = await ask_gemini_with_knowledge("Parle du service Vidéo IA, prix et délais.")
     else:
         reponse = await ask_gemini_with_knowledge(text)
-    await update.message.reply_text(reponse, reply_markup=reply_markup)
+    await safe_reply(update, reponse)
+
+async def _cleanup_webhook():
+    """Force Telegram à fermer toute ancienne session getUpdates avant de démarrer
+    le polling — évite l'erreur 'Conflict: terminated by other getUpdates request'
+    quand Railway redéploie et qu'un ancien conteneur tourne encore quelques secondes."""
+    from telegram import Bot
+    bot = Bot(token=TELEGRAM_TOKEN)
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+        print("Webhook nettoyé — ancienne session fermée.")
+    except Exception as e:
+        print(f"⚠️ delete_webhook: {e}")
+    finally:
+        await bot.shutdown()
 
 def main():
     threading.Thread(target=start_health_server, daemon=True).start()
+    asyncio.run(_cleanup_webhook())
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("genere", genere))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
     print(f"Bot {KNOWLEDGE['agence']} lancé...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=False)
 
 if __name__ == "__main__":
     main()
