@@ -1,0 +1,5 @@
+[phases.setup]
+nixPkgs = ["python311"]
+
+[nixpacks]
+version = "1"
