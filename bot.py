@@ -21,6 +21,53 @@ if not GEMINI_API_KEY:
 
 KNOWLEDGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge.json")
 EXAMPLES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")
+
+# Script de génération et retouche d'image — guide le comportement du bot
+IMAGE_GENIUS_PROMPT = """Tu es Komara Agency, bot génératif d'image et retouche photo professionnelle.
+
+MISSION
+Créer des images originales et retoucher des photos uploadées avec précision, fidélité et créativité. Objectif: visuels prêts pour réseaux sociaux, e-commerce, branding.
+
+COMPÉTENCES
+1. Génération: Transforme un prompt en image cohérente, esthétique et détaillée.
+2. Retouche: Modifie l'image uploadée sans déformer l'identité. Change fond, lumière, couleur, vêtements, supprime/ajoute des éléments.
+3. Restauration: Améliore photos floues, anciennes, abîmées en gardant le naturel.
+4. Style: Applique photo réaliste, illustration, 3D, cinématique, minimaliste, aquarelle, anime.
+
+RÈGLES DE GÉNÉRATION
+- Suis le prompt avec précision. Si un détail est flou, garde un rendu réaliste et neutre.
+- Respecte la composition: cadrage, perspective, lumière, ombres cohérentes.
+- Visages et mains: naturels, sans déformation ni doigt en trop.
+- Texte: écris-le lisiblement uniquement si demandé.
+- Vise la meilleure qualité sans artefact ni flou excessif.
+
+PRINCIPES DE RETOUCHE
+1. Fidélité: Ne change que ce qui est demandé. Garde l'identité et l'expression.
+2. Réalisme: Les retouches doivent être invisibles. Pas d'effet plastique.
+3. Cohérence: Lumière, couleur, grain doivent matcher avec l'original.
+4. Non-destructif: Préserve la qualité et les détails importants.
+
+STYLES
+Photo réaliste, portrait studio, lifestyle, produit e-commerce, illustration vectorielle, 3D, cinématique, noir et blanc, vintage.
+Par défaut, utilise photo réaliste haute qualité.
+
+INTERDITS
+- Images sexuelles impliquant des mineurs. Refus immédiat.
+- Deepfake trompeur, harcèlement, usurpation d'identité.
+- Contenu violent, gore, haineux, illégal.
+- Retouche non consentie du visage d'une personne réelle à des fins trompeuses.
+Si la demande viole ces règles, refuse et propose une alternative sûre.
+
+FLUX DE TRAVAIL
+1. Analyse le prompt ou l'image uploadée.
+2. Si info manquante, pose 1 question courte sur style, cadrage, couleur.
+3. Exécute la génération ou retouche.
+4. Propose 1-2 variantes: "Veux-tu plus lumineux?", "Autre fond?".
+
+FORMAT DE RÉPONSE
+Sois concis. Pour une retouche, décris en 1 ligne ce qui a changé.
+Ex: "Fond changé en blanc studio, lumière adoucie, peau retouchée naturellement."
+Termine par une proposition d'amélioration."""
 try:
     with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
         KNOWLEDGE = json.load(f)
@@ -106,13 +153,15 @@ Assistant officiel de {KNOWLEDGE['agence']}
 {KNOWLEDGE['slogan']}
 
 Je peux vous aider à:
-• Générer des images IA
+• Générer des images IA (/genere + description)
+• Retoucher vos photos (envoyez une photo + vos instructions)
 • Avoir un devis pour site web/logo
 • Connaître nos services
 
-Commandes disponibles:
+Commandes:
 /genere + description → créer une image IA
 /exemples → voir nos réalisations
+Photo + texte → retoucher une photo
 
 Ou tapez sur un bouton ci-dessous 👇"""
     await update.message.reply_text(texte, reply_markup=reply_markup)
@@ -215,6 +264,157 @@ async def exemples(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
     )
 
+async def analyze_photo_with_gemini(photo_bytes: bytes, user_instructions: str) -> str:
+    """Utilise Gemini Vision pour analyser la photo uploadée et produire un prompt
+    de génération détaillé qui combine la description de l'image + les instructions
+    du client. Le résultat alimente Pollinations.ai pour la génération finale."""
+    b64_image = base64.b64encode(photo_bytes).decode("utf-8")
+
+    analyze_prompt = (
+        f"{IMAGE_GENIUS_PROMPT}\n\n"
+        "Tu vas recevoir une image uploadée par un client. Analyse-la en détail: "
+        "sujet, cadrage, couleurs, lumière, arrière-plan, vêtements, style, ambiance. "
+        "Ensuite, combine cette analyse avec les instructions du client pour produire "
+        "UN SEUL prompt en anglais, extrêmement détaillé, qui servira à générer une "
+        "nouvelle image via un modèle text-to-image.\n\n"
+        "RÈGLES CRITIQUES:\n"
+        "- Le prompt final doit décrire EXACTEMENT ce que le client veut voir\n"
+        "- Si le client demande de changer le fond, décris le NOUVEAU fond\n"
+        "- Si le client demande de changer les couleurs, décris les NOUVELLES couleurs\n"
+        "- Garde l'identité du sujet (âge, genre, pose) sauf si le client demande de changer\n"
+        "- Ajoute: 'high quality, professional, detailed, 4k, photorealistic'\n"
+        "- Ne JAMAIS ajouter de style non demandé par le client\n\n"
+        f"Instructions du client: {user_instructions if user_instructions else 'Améliorer cette photo avec un rendu professionnel'}\n\n"
+        "Réponds UNIQUEMENT avec le prompt en anglais, sans introduction ni explication."
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": analyze_prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
+            ]
+        }],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 800},
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=45.0)
+            response.raise_for_status()
+            data = response.json()
+        parts = data["candidates"][0]["content"]["parts"]
+        return "".join([p["text"] for p in parts if "text" in p]).strip()
+    except Exception as e:
+        print(f"⚠️ Erreur analyse Gemini Vision: {e}")
+        return None
+
+async def describe_retouche_result(user_instructions: str, photo_description: str) -> str:
+    """Génère une courte description en français de ce qui a été fait, style:
+    'Fond changé en blanc studio, lumière adoucie, peau retouchée naturellement.'"""
+    prompt = (
+        f"{IMAGE_GENIUS_PROMPT}\n\n"
+        "Le client a demandé une retouche. Voici ses instructions et la description de la photo originale. "
+        "Décris en UNE ligne en français ce qui a été changé, puis propose une amélioration.\n\n"
+        f"Instructions: {user_instructions}\n"
+        f"Photo analysée: {photo_description[:500]}\n\n"
+        "Format: description courte + une question d'amélioration."
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 200},
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=30.0)
+            response.raise_for_status()
+            data = response.json()
+        parts = data["candidates"][0]["content"]["parts"]
+        return "".join([p["text"] for p in parts if "text" in p]).strip()
+    except Exception as e:
+        print(f"⚠️ Erreur description retouche: {e}")
+        return "Retouche effectuée selon vos instructions."
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gère les photos envoyées par le client — avec ou sans instructions en caption.
+    Avec caption: analyse la photo + applique les instructions -> génère le résultat.
+    Sans caption: demande ce que le client veut faire avec sa photo."""
+    try:
+        # Récupérer le texte (caption) s'il y en a un
+        user_instructions = update.message.caption or ""
+
+        if not user_instructions:
+            await update.message.reply_text(
+                "📸 Photo reçue! Décrivez-moi ce que vous voulez faire avec:\n"
+                "• Changer le fond\n"
+                "• Retoucher la lumière/les couleurs\n"
+                "• Améliorer la qualité\n"
+                "• Changer de style\n"
+                "• Ajouter/supprimer un élément\n\n"
+                "Répondez simplement avec vos instructions.",
+                reply_markup=reply_markup,
+            )
+            return
+
+        # Vérifier les interdits
+        forbidden = ["mineur", "deepfake", "usurpation", "harcèlement", "violence", "gore"]
+        if any(w in user_instructions.lower() for w in forbidden):
+            await update.message.reply_text(
+                "Je ne peux pas traiter cette demande. Elle va à l'encontre de mes règles d'utilisation. "
+                "Je peux vous proposer une alternative sûre — décrivez votre besoin différemment. 🙏",
+                reply_markup=reply_markup,
+            )
+            return
+
+        await update.message.reply_text("Analyse de votre photo et génération en cours... ⏳ 30-40s", reply_markup=reply_markup)
+
+        # 1. Télécharger la photo depuis Telegram
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+
+        # 2. Analyser la photo avec Gemini Vision pour créer un prompt détaillé
+        generation_prompt = await analyze_photo_with_gemini(bytes(photo_bytes), user_instructions)
+
+        if not generation_prompt:
+            # Fallback: utiliser directement les instructions du client
+            generation_prompt = f"{user_instructions}, high quality, professional, detailed, 4k, photorealistic"
+
+        # 3. Générer l'image via Pollinations.ai
+        image_url = f"https://image.pollinations.ai/prompt/{quote(generation_prompt[:1500])}?width=1024&height=1024&nologo=true&seed={abs(hash(generation_prompt)) % 1000000}"
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            response = await client.get(image_url, timeout=60.0)
+        response.raise_for_status()
+        result_photo = io.BytesIO(response.content)
+        result_photo.name = "komara_retouche.png"
+
+        # 4. Générer une description courte du résultat
+        description = await describe_retouche_result(user_instructions, generation_prompt)
+
+        # 5. Envoyer le résultat
+        caption = f"{description}\n\nVeux-tu une variante? Contactez-nous: {KNOWLEDGE['contact']['whatsapp']}"
+        await update.message.reply_photo(result_photo, caption=caption, reply_markup=reply_markup)
+
+    except httpx.HTTPStatusError as e:
+        print(f"⚠️ Erreur HTTP génération: {e}")
+        await update.message.reply_text(
+            f"La génération a échoué. Réessayez avec une photo plus simple, "
+            f"ou contactez-nous: {KNOWLEDGE['contact']['whatsapp']}",
+            reply_markup=reply_markup,
+        )
+    except Exception as e:
+        print(f"⚠️ Erreur handle_photo: {e}")
+        await update.message.reply_text(
+            f"Désolé, une erreur est survenue avec votre photo. 🙏 "
+            f"Contactez-nous: {KNOWLEDGE['contact']['whatsapp']}",
+            reply_markup=reply_markup,
+        )
+
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     try:
@@ -272,6 +472,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("genere", genere))
     app.add_handler(CommandHandler("exemples", exemples))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
     app.add_error_handler(error_handler)
     print(f"Bot {KNOWLEDGE['agence']} lancé...")
