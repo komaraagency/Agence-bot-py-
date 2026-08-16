@@ -3,7 +3,6 @@ import io
 import sys
 import json
 import base64
-import asyncio
 import threading
 from urllib.parse import quote
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -151,30 +150,19 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reponse = await ask_gemini_with_knowledge(text)
     await safe_reply(update, reponse)
 
-async def _cleanup_webhook():
-    """Force Telegram à fermer toute ancienne session getUpdates avant de démarrer
-    le polling — évite l'erreur 'Conflict: terminated by other getUpdates request'
-    quand Railway redéploie et qu'un ancien conteneur tourne encore quelques secondes."""
-    from telegram import Bot
-    bot = Bot(token=TELEGRAM_TOKEN)
-    try:
-        await bot.delete_webhook(drop_pending_updates=False)
-        print("Webhook nettoyé — ancienne session fermée.")
-    except Exception as e:
-        print(f"⚠️ delete_webhook: {e}")
-    finally:
-        await bot.shutdown()
-
 def main():
     threading.Thread(target=start_health_server, daemon=True).start()
-    asyncio.run(_cleanup_webhook())
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("genere", genere))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
     print(f"Bot {KNOWLEDGE['agence']} lancé...")
-    app.run_polling(drop_pending_updates=False)
+    # run_polling() gère lui-même le nettoyage du webhook (delete_webhook) avant
+    # de démarrer — pas besoin d'appeler asyncio.run() nous-mêmes ici : ça créait
+    # et fermait une boucle asyncio séparée, ce qui cassait la boucle que
+    # run_polling() essaie ensuite de récupérer ("no current event loop").
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
