@@ -117,16 +117,31 @@ Commandes disponibles:
 Ou tapez sur un bouton ci-dessous 👇"""
     await update.message.reply_text(texte, reply_markup=reply_markup)
 
-async def genere(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    prompt = " ".join(context.args)
-    if not prompt:
-        await update.message.reply_text("Ex: /genere affiche publicitaire pour Komara Agency")
-        return
-    await update.message.reply_text("Création de votre visuel IA en cours... ⏳ 20s")
+# Mots-clés qui indiquent une demande d'image même sans /genere explicite.
+IMAGE_KEYWORDS = [
+    "génère", "genere", "générer", "generer", "crée une image", "créer une image",
+    "cree une image", "creer une image", "fais une image", "fait une image",
+    "photo de", "image de", "logo pour", "logo de", "affiche pour", "affiche de",
+    "visuel pour", "visuel de", "design pour", "montage photo", "colorisation",
+    "coloriser", "photoréaliste", "photorealiste", "upscale", "rendu final",
+    "arrière-plan", "background", "retouche photo",
+]
 
-    # Pollinations.ai — gratuit, sans clé API. On suit le prompt du client TEL QUEL
-    # (sans rajouter "publicitaire 4k africain" qui écrasait son intention réelle).
-    # On ajoute juste "high quality, professional" pour la netteté, rien de plus.
+def _should_generate_image(text: str) -> bool:
+    """Règle de routage: prompt long (>25 mots) OU mots-clés précis -> génération
+    d'image automatique, même si le client n'a pas tapé /genere."""
+    if len(text.split()) > 25:
+        return True
+    lowered = text.lower()
+    return any(k in lowered for k in IMAGE_KEYWORDS)
+
+async def generate_and_send_image(update: Update, prompt: str):
+    """Génère et envoie l'image en suivant STRICTEMENT le prompt du client —
+    on n'y ajoute que des mots-clés de qualité, jamais de style imposé qui
+    écraserait son intention réelle."""
+    await update.message.reply_text("Création de votre visuel IA en cours... ⏳ 20s", reply_markup=reply_markup)
+
+    # Pollinations.ai — gratuit, sans clé API. httpx async: rien ne bloque l'event loop.
     clean_prompt = prompt.strip()
     enhanced_prompt = f"{clean_prompt}, high quality, professional, detailed, 4k"
     image_url = f"https://image.pollinations.ai/prompt/{quote(enhanced_prompt)}?width=1024&height=1024&nologo=true&seed={abs(hash(clean_prompt)) % 1000000}"
@@ -137,9 +152,25 @@ async def genere(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response.raise_for_status()
         photo = io.BytesIO(response.content)
         photo.name = "komara_image.png"
-        await update.message.reply_photo(photo, caption=f"Voici votre visuel: {prompt}\n\nVoulez-vous l'utiliser pour une pub? Contactez-nous.")
+        await update.message.reply_photo(
+            photo,
+            caption="Voici votre visuel selon votre description.\n\nVoulez-vous l'utiliser pour une pub? Contactez-nous.",
+            reply_markup=reply_markup,
+        )
     except Exception as e:
-        await update.message.reply_text(f"Erreur de génération: {e}")
+        print(f"⚠️ Erreur génération image: {e}")
+        await update.message.reply_text(
+            f"Désolé, la génération a échoué. Réessayez avec une description plus courte, "
+            f"ou contactez-nous: {KNOWLEDGE['contact']['whatsapp']}",
+            reply_markup=reply_markup,
+        )
+
+async def genere(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    prompt = " ".join(context.args)
+    if not prompt:
+        await update.message.reply_text("Ex: /genere affiche publicitaire pour Komara Agency", reply_markup=reply_markup)
+        return
+    await generate_and_send_image(update, prompt)
 
 async def exemples(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Envoie les photos d'exemples stockées dans le dossier examples/ du repo."""
@@ -186,22 +217,53 @@ async def exemples(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    if text == "Vos services":
-        reponse = await ask_gemini_with_knowledge("Présente tous les services de Komara Agency avec prix et délais de façon commerciale.")
-    elif text == "Tarifs":
-        reponse = await ask_gemini_with_knowledge("Donne la liste des tarifs de tous les services.")
-    elif text == "Commander":
-        reponse = f"Parfait! Décrivez votre projet ici ou contactez directement notre équipe sur WhatsApp: {KNOWLEDGE['contact']['whatsapp_lien']}"
-    elif text == "Contact":
-        c = KNOWLEDGE['contact']
-        reponse = f"📞 **Contactez {KNOWLEDGE['agence']}**\n\nWhatsApp: {c['whatsapp']}\nEmail: {c['email']}\nAdresse: {c['adresse']}\nPortfolio: {c['portfolio']}\n\n{KNOWLEDGE['slogan']}"
-    elif text == "Portfolio":
-        reponse = f"Découvrez nos réalisations ici 👇\n{KNOWLEDGE['contact']['portfolio']}"
-    elif text == "Vidéo IA":
-        reponse = await ask_gemini_with_knowledge("Parle du service Vidéo IA, prix et délais.")
-    else:
-        reponse = await ask_gemini_with_knowledge(text)
-    await safe_reply(update, reponse)
+    try:
+        if text == "Vos services":
+            reponse = await ask_gemini_with_knowledge("Présente tous les services de Komara Agency avec prix et délais de façon commerciale.")
+        elif text == "Tarifs":
+            reponse = await ask_gemini_with_knowledge("Donne la liste des tarifs de tous les services.")
+        elif text == "Commander":
+            reponse = f"Parfait! Décrivez votre projet ici ou contactez directement notre équipe sur WhatsApp: {KNOWLEDGE['contact']['whatsapp_lien']}"
+        elif text == "Contact":
+            c = KNOWLEDGE['contact']
+            reponse = f"📞 **Contactez {KNOWLEDGE['agence']}**\n\nWhatsApp: {c['whatsapp']}\nEmail: {c['email']}\nAdresse: {c['adresse']}\nPortfolio: {c['portfolio']}\n\n{KNOWLEDGE['slogan']}"
+        elif text == "Portfolio":
+            reponse = f"Découvrez nos réalisations ici 👇\n{KNOWLEDGE['contact']['portfolio']}"
+        elif text == "Vidéo IA":
+            reponse = await ask_gemini_with_knowledge("Parle du service Vidéo IA, prix et délais.")
+        elif _should_generate_image(text):
+            # Prompt long (>25 mots) ou mots-clés précis -> génération d'image
+            # directe, sans exiger que le client tape /genere.
+            await generate_and_send_image(update, text)
+            return
+        else:
+            reponse = await ask_gemini_with_knowledge(text)
+        await safe_reply(update, reponse)
+    except Exception as e:
+        # Filet de sécurité: le bot ne doit JAMAIS rester silencieux, même en cas
+        # de bug imprévu. On log l'erreur et on répond quand même au client.
+        print(f"⚠️ Erreur dans handle_menu: {e}")
+        try:
+            await update.message.reply_text(
+                f"Désolé, un problème technique est survenu. 🙏 Contactez-nous: {KNOWLEDGE['contact']['whatsapp']}",
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            pass
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Filet de sécurité ultime au niveau de l'application: si un handler plante
+    d'une façon totalement imprévue (bug non couvert par les try/except internes),
+    le bot répond quand même au client au lieu de rester silencieux."""
+    print(f"⚠️ Erreur non gérée par l'application: {context.error}")
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                f"Désolé, un problème technique est survenu. 🙏 Contactez-nous: {KNOWLEDGE['contact']['whatsapp']}",
+                reply_markup=reply_markup,
+            )
+    except Exception:
+        pass
 
 def main():
     threading.Thread(target=start_health_server, daemon=True).start()
@@ -211,6 +273,7 @@ def main():
     app.add_handler(CommandHandler("genere", genere))
     app.add_handler(CommandHandler("exemples", exemples))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
+    app.add_error_handler(error_handler)
     print(f"Bot {KNOWLEDGE['agence']} lancé...")
     # run_polling() gère lui-même le nettoyage du webhook (delete_webhook) avant
     # de démarrer — pas besoin d'appeler asyncio.run() nous-mêmes ici : ça créait
