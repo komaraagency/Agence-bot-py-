@@ -20,6 +20,7 @@ if not GEMINI_API_KEY:
     sys.exit("ERREUR: GEMINI_API_KEY manquant.")
 
 KNOWLEDGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge.json")
+EXAMPLES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")
 try:
     with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
         KNOWLEDGE = json.load(f)
@@ -109,7 +110,10 @@ Je peux vous aider à:
 • Avoir un devis pour site web/logo
 • Connaître nos services
 
-Utilisez /genere + votre idée pour créer une image.
+Commandes disponibles:
+/genere + description → créer une image IA
+/exemples → voir nos réalisations
+
 Ou tapez sur un bouton ci-dessous 👇"""
     await update.message.reply_text(texte, reply_markup=reply_markup)
 
@@ -120,11 +124,12 @@ async def genere(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("Création de votre visuel IA en cours... ⏳ 20s")
 
-    # Gemini native image generation (gemini-2.5-flash-image) a un quota GRATUIT à zéro
-    # (erreur 429 immédiate). On utilise Pollinations.ai — gratuit, sans clé — comme le
-    # bot komara-video-agent. httpx est déjà async donc rien ne bloque l'event loop.
-    enhanced_prompt = f"Image publicitaire 4k, style professionnel africain, pour entreprise: {prompt}"
-    image_url = f"https://image.pollinations.ai/prompt/{quote(enhanced_prompt)}?width=1024&height=1024&nologo=true&seed={hash(prompt) % 100000}"
+    # Pollinations.ai — gratuit, sans clé API. On suit le prompt du client TEL QUEL
+    # (sans rajouter "publicitaire 4k africain" qui écrasait son intention réelle).
+    # On ajoute juste "high quality, professional" pour la netteté, rien de plus.
+    clean_prompt = prompt.strip()
+    enhanced_prompt = f"{clean_prompt}, high quality, professional, detailed, 4k"
+    image_url = f"https://image.pollinations.ai/prompt/{quote(enhanced_prompt)}?width=1024&height=1024&nologo=true&seed={abs(hash(clean_prompt)) % 1000000}"
 
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -135,6 +140,49 @@ async def genere(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_photo(photo, caption=f"Voici votre visuel: {prompt}\n\nVoulez-vous l'utiliser pour une pub? Contactez-nous.")
     except Exception as e:
         await update.message.reply_text(f"Erreur de génération: {e}")
+
+async def exemples(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Envoie les photos d'exemples stockées dans le dossier examples/ du repo."""
+    # Lister les images dans examples/
+    valid_exts = (".jpg", ".jpeg", ".png", ".webp")
+    try:
+        image_files = [
+            f for f in os.listdir(EXAMPLES_DIR)
+            if f.lower().endswith(valid_exts) and os.path.isfile(os.path.join(EXAMPLES_DIR, f))
+        ]
+    except Exception:
+        image_files = []
+
+    if not image_files:
+        await update.message.reply_text(
+            "Aucun exemple disponible pour le moment. 📸\n"
+            "Nos réalisations arrivent bientôt !\n\n"
+            f"En attendant, contactez-nous: {KNOWLEDGE['contact']['whatsapp']}",
+            reply_markup=reply_markup,
+        )
+        return
+
+    await update.message.reply_text(
+        f"Voici quelques réalisations de {KNOWLEDGE['agence']} 📸",
+        reply_markup=reply_markup,
+    )
+
+    # Envoyer chaque image (max 5 pour éviter le spam)
+    for img_name in image_files[:5]:
+        img_path = os.path.join(EXAMPLES_DIR, img_name)
+        try:
+            with open(img_path, "rb") as f:
+                await update.message.reply_photo(
+                    photo=f,
+                    caption=f"Réalisé par {KNOWLEDGE['agence']} ✨",
+                )
+        except Exception as e:
+            print(f"⚠️ Erreur envoi {img_name}: {e}")
+
+    await update.message.reply_text(
+        "Voulez-vous un projet similaire? Tapez /genere + votre idée pour un visuel sur-mesure. 🎨",
+        reply_markup=reply_markup,
+    )
 
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -161,6 +209,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("genere", genere))
+    app.add_handler(CommandHandler("exemples", exemples))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
     print(f"Bot {KNOWLEDGE['agence']} lancé...")
     # run_polling() gère lui-même le nettoyage du webhook (delete_webhook) avant
