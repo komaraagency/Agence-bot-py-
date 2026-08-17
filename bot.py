@@ -23,6 +23,19 @@ if not GEMINI_API_KEY:
 KNOWLEDGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge.json")
 EXAMPLES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")
 
+# Libellés lisibles pour chaque fichier d'exemple (utilisés dans le menu /exemples).
+# Fallback automatique sur le nom de fichier si un nouveau fichier n'est pas listé ici.
+EXAMPLE_LABELS = {
+    "portrait_studio_homme.jpg": "Portrait studio (bonnet noir)",
+    "flyer_tarifs_komara.jpg": "Flyer tarifs",
+    "portrait_tenue_traditionnelle.jpg": "Portrait tenue traditionnelle",
+    "lifestyle_cuisine_couple.jpg": "Lifestyle cuisine",
+    "pub_business_24_7.jpg": "Pub \"Business 24/7\"",
+    "scene_the_marocain.jpg": "Scène thé marocain",
+    "portrait_studio_bonnet_ka.jpg": "Portrait studio (logo KA)",
+    "creatif_bouteille_ndine_komara.jpg": "Visuel créatif original",
+}
+
 # Script de génération et retouche d'image — guide le comportement du bot
 IMAGE_GENIUS_PROMPT = """Tu es Komara Agency, bot génératif d'image et retouche photo professionnelle.
 
@@ -222,17 +235,28 @@ async def genere(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await generate_and_send_image(update, prompt)
 
-async def exemples(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envoie les photos d'exemples stockées dans le dossier examples/ du repo."""
-    # Lister les images dans examples/
+def _list_example_files():
     valid_exts = (".jpg", ".jpeg", ".png", ".webp")
     try:
-        image_files = [
+        return sorted(
             f for f in os.listdir(EXAMPLES_DIR)
             if f.lower().endswith(valid_exts) and os.path.isfile(os.path.join(EXAMPLES_DIR, f))
-        ]
+        )
     except Exception:
-        image_files = []
+        return []
+
+def _label_for(filename: str) -> str:
+    if filename in EXAMPLE_LABELS:
+        return EXAMPLE_LABELS[filename]
+    # Fallback: transforme le nom de fichier en libellé lisible
+    name = os.path.splitext(filename)[0].replace("_", " ").replace("-", " ")
+    return name.capitalize()
+
+async def exemples(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche un MENU des exemples disponibles (texte uniquement, aucune photo
+    envoyée à ce stade). Le client choisit un numéro -> le bot envoie UNE SEULE
+    photo correspondante, pas plusieurs, pour ne pas spammer le chat."""
+    image_files = _list_example_files()
 
     if not image_files:
         await update.message.reply_text(
@@ -243,30 +267,132 @@ async def exemples(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(
-        f"Voici quelques réalisations de {KNOWLEDGE['agence']} 📸",
-        reply_markup=reply_markup,
-    )
-
-    # Envoyer chaque image (max 5 pour éviter le spam)
-    # On mélange pour varier ce que les clients voient à chaque /exemples,
-    # et on limite à 6 pour ne pas spammer le chat.
+    # On mélange l'ordre affiché pour varier ce que les clients voient à chaque appel.
     random.shuffle(image_files)
-    for img_name in image_files[:6]:
-        img_path = os.path.join(EXAMPLES_DIR, img_name)
-        try:
-            with open(img_path, "rb") as f:
-                await update.message.reply_photo(
-                    photo=f,
-                    caption=f"Réalisé par {KNOWLEDGE['agence']} ✨",
-                )
-        except Exception as e:
-            print(f"⚠️ Erreur envoi {img_name}: {e}")
 
-    await update.message.reply_text(
-        "Voulez-vous un projet similaire? Tapez /genere + votre idée pour un visuel sur-mesure. 🎨",
-        reply_markup=reply_markup,
+    lignes = [f"{i+1}. {_label_for(f)}" for i, f in enumerate(image_files)]
+    texte = (
+        f"Voici nos modèles de réalisations {KNOWLEDGE['agence']} 📸\n\n"
+        + "\n".join(lignes)
+        + "\n\nRépondez avec le NUMÉRO du modèle qui vous intéresse pour le voir en photo."
     )
+
+    # On mémorise la liste proposée pour cet utilisateur, dans l'ordre affiché,
+    # afin de savoir quelle photo envoyer quand il répond par un numéro.
+    context.user_data["pending_examples"] = image_files
+
+    await update.message.reply_text(texte, reply_markup=reply_markup)
+
+async def handle_example_choice(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """Si un menu /exemples est en attente pour cet utilisateur, tente de faire
+    correspondre sa réponse (numéro ou nom) à UN SEUL exemple et l'envoie.
+    Retourne True si la réponse a été traitée ici (pour arrêter le routage normal)."""
+    pending = context.user_data.get("pending_examples")
+    if not pending:
+        return False
+
+    choice = text.strip()
+    selected = None
+
+    # Correspondance par numéro (1-indexé)
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(pending):
+            selected = pending[idx]
+
+    # Correspondance par nom/libellé approximatif
+    if selected is None:
+        lowered = choice.lower()
+        for f in pending:
+            if lowered in _label_for(f).lower() or lowered in f.lower():
+                selected = f
+                break
+
+    if selected is None:
+        # Réponse non reconnue: on redemande poliment, sans spammer de photo,
+        # et on garde le menu actif pour un nouvel essai.
+        await update.message.reply_text(
+            "Je n'ai pas reconnu ce choix. Répondez avec le NUMÉRO du modèle "
+            "affiché dans la liste ci-dessus (ex: 1).",
+            reply_markup=reply_markup,
+        )
+        return True
+
+    # On envoie EXACTEMENT une photo, puis on nettoie l'état pour ce client.
+    context.user_data.pop("pending_examples", None)
+    img_path = os.path.join(EXAMPLES_DIR, selected)
+    try:
+        with open(img_path, "rb") as f:
+            await update.message.reply_photo(
+                photo=f,
+                caption=f"{_label_for(selected)} — Réalisé par {KNOWLEDGE['agence']} ✨",
+                reply_markup=reply_markup,
+            )
+        await update.message.reply_text(
+            "Voulez-vous un projet similaire? Tapez /genere + votre idée pour un visuel sur-mesure. 🎨",
+            reply_markup=reply_markup,
+        )
+    except Exception as e:
+        print(f"⚠️ Erreur envoi exemple {selected}: {e}")
+        await update.message.reply_text(
+            f"Désolé, une erreur est survenue. Contactez-nous: {KNOWLEDGE['contact']['whatsapp']}",
+            reply_markup=reply_markup,
+        )
+    return True
+
+async def edit_photo_with_gemini_image(photo_bytes: bytes, user_instructions: str):
+    """Retouche RÉELLE de la photo — contrairement à Pollinations (texte -> nouvelle image
+    générée from scratch, donc incohérente avec l'original), Gemini 2.5 Flash Image (Nano
+    Banana) édite DIRECTEMENT les pixels de la photo fournie. La pose, le décor, l'identité
+    du sujet et le cadrage sont donc préservés — seuls les éléments demandés par le client
+    changent. C'est le fix pour le problème 'images incohérentes qui ne suivent pas le prompt'.
+
+    Retourne (image_bytes, description_texte) ou (None, None) en cas d'échec."""
+    b64_image = base64.b64encode(photo_bytes).decode("utf-8")
+
+    edit_prompt = (
+        f"{IMAGE_GENIUS_PROMPT}\n\n"
+        "Voici une photo à retoucher. Applique STRICTEMENT et UNIQUEMENT les instructions "
+        "du client ci-dessous. Ne change RIEN d'autre: garde exactement la même pose, le même "
+        "cadrage, la même composition, le même arrière-plan (sauf si demandé), la même identité "
+        "du sujet. Aucun déplacement, repositionnement, ajout ou suppression non demandé. "
+        "Aucun recadrage sauf si explicitement demandé.\n\n"
+        f"Instructions du client: {user_instructions}\n\n"
+        "Après l'image, ajoute UNE ligne en français décrivant ce qui a été changé."
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": edit_prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
+            ]
+        }],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=60.0)
+            response.raise_for_status()
+            data = response.json()
+        parts = data["candidates"][0]["content"]["parts"]
+        image_bytes = None
+        description = None
+        for part in parts:
+            # L'API renvoie inlineData (camelCase) en JSON, mais on vérifie les deux
+            # variantes par sécurité selon la version d'API.
+            inline = part.get("inlineData") or part.get("inline_data")
+            if inline and inline.get("data"):
+                image_bytes = base64.b64decode(inline["data"])
+            elif part.get("text"):
+                description = part["text"].strip()
+        return image_bytes, description
+    except Exception as e:
+        print(f"⚠️ Erreur édition Gemini Image: {e}")
+        return None, None
 
 async def analyze_photo_with_gemini(photo_bytes: bytes, user_instructions: str) -> str:
     """Utilise Gemini Vision pour analyser la photo uploadée et produire un prompt
@@ -375,33 +501,45 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await update.message.reply_text("Analyse de votre photo et génération en cours... ⏳ 30-40s", reply_markup=reply_markup)
+        await update.message.reply_text("Analyse de votre photo et retouche en cours... ⏳ 20-30s", reply_markup=reply_markup)
 
         # 1. Télécharger la photo depuis Telegram
         photo_file = await update.message.photo[-1].get_file()
-        photo_bytes = await photo_file.download_as_bytearray()
+        photo_bytes = bytes(await photo_file.download_as_bytearray())
 
-        # 2. Analyser la photo avec Gemini Vision pour créer un prompt détaillé
-        generation_prompt = await analyze_photo_with_gemini(bytes(photo_bytes), user_instructions)
+        # 2. Retouche RÉELLE via Gemini 2.5 Flash Image — édite les pixels de la
+        # photo fournie au lieu de régénérer une image complètement différente.
+        # C'est la méthode prioritaire: elle suit fidèlement le prompt et préserve
+        # la photo originale (pose, décor, identité).
+        image_bytes, description = await edit_photo_with_gemini_image(photo_bytes, user_instructions)
 
+        if image_bytes:
+            result_photo = io.BytesIO(image_bytes)
+            result_photo.name = "komara_retouche.png"
+            caption = f"{description or 'Retouche effectuée selon vos instructions.'}\n\nVeux-tu une variante? Contactez-nous: {KNOWLEDGE['contact']['whatsapp']}"
+            await update.message.reply_photo(result_photo, caption=caption, reply_markup=reply_markup)
+            return
+
+        # 3. Filet de sécurité: si l'édition Gemini échoue (quota, erreur réseau...),
+        # on retombe sur l'ancienne méthode Pollinations pour ne jamais laisser le
+        # client sans réponse — priorité à la stabilité du bot.
+        print("⚠️ Édition Gemini Image indisponible, repli sur Pollinations.")
+        generation_prompt = await analyze_photo_with_gemini(photo_bytes, user_instructions)
         if not generation_prompt:
-            # Fallback: utiliser directement les instructions du client
             generation_prompt = f"{user_instructions}, high quality, professional, detailed, 4k, photorealistic"
 
-        # 3. Générer l'image via Pollinations.ai
         image_url = f"https://image.pollinations.ai/prompt/{quote(generation_prompt[:1500])}?width=1024&height=1024&nologo=true&seed={abs(hash(generation_prompt)) % 1000000}"
-
         async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.get(image_url, timeout=60.0)
         response.raise_for_status()
         result_photo = io.BytesIO(response.content)
         result_photo.name = "komara_retouche.png"
 
-        # 4. Générer une description courte du résultat
-        description = await describe_retouche_result(user_instructions, generation_prompt)
-
-        # 5. Envoyer le résultat
-        caption = f"{description}\n\nVeux-tu une variante? Contactez-nous: {KNOWLEDGE['contact']['whatsapp']}"
+        fallback_description = await describe_retouche_result(user_instructions, generation_prompt)
+        caption = (
+            f"{fallback_description}\n\n⚠️ Résultat approximatif (mode secours). "
+            f"Contactez-nous pour un rendu garanti fidèle: {KNOWLEDGE['contact']['whatsapp']}"
+        )
         await update.message.reply_photo(result_photo, caption=caption, reply_markup=reply_markup)
 
     except httpx.HTTPStatusError as e:
@@ -422,6 +560,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     try:
+        # Si un menu /exemples est en attente pour ce client, on traite sa réponse
+        # ici en priorité (un seul exemple envoyé), avant tout autre routage.
+        if await handle_example_choice(update, context, text):
+            return
+
+        if text.lower() in ("exemple", "exemples", "/exemple", "/exemples"):
+            await exemples(update, context)
+            return
+
         if text == "Vos services":
             reponse = await ask_gemini_with_knowledge("Présente tous les services de Komara Agency avec prix et délais de façon commerciale.")
         elif text == "Tarifs":
@@ -476,6 +623,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("genere", genere))
     app.add_handler(CommandHandler("exemples", exemples))
+    app.add_handler(CommandHandler("exemple", exemples))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
     app.add_error_handler(error_handler)
