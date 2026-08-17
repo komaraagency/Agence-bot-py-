@@ -441,14 +441,62 @@ async def handle_example_choice(update: Update, context: ContextTypes.DEFAULT_TY
         )
     return True
 
+# Modèles Gemini Image testés dans l'ordre — les noms de modèles Google changent
+# régulièrement (preview -> stable -> renommage), donc on essaie plusieurs candidats
+# au lieu de dépendre d'un seul nom qui peut devenir invalide du jour au lendemain.
+GEMINI_IMAGE_MODELS = [
+    "gemini-2.5-flash-image-preview",
+    "gemini-2.5-flash-image",
+    "gemini-3.1-flash-image-preview",
+    "gemini-3.1-flash-lite-image",
+]
+
+async def _call_gemini_image_model(model: str, edit_prompt: str, b64_image: str):
+    """Appelle UN modèle Gemini Image donné. Retourne (image_bytes, description, error_str)."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": edit_prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
+            ]
+        }],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=60.0)
+        if response.status_code != 200:
+            # On logue le VRAI message d'erreur renvoyé par Google (clé invalide,
+            # modèle inexistant, quota à 0, etc.) au lieu de le cacher — indispensable
+            # pour diagnostiquer précisément pourquoi Gemini échoue.
+            return None, None, f"HTTP {response.status_code}: {response.text[:300]}"
+        data = response.json()
+        parts = data["candidates"][0]["content"]["parts"]
+        image_bytes = None
+        description = None
+        for part in parts:
+            inline = part.get("inlineData") or part.get("inline_data")
+            if inline and inline.get("data"):
+                image_bytes = base64.b64decode(inline["data"])
+            elif part.get("text"):
+                description = part["text"].strip()
+        if image_bytes is None:
+            return None, None, f"Réponse 200 mais aucune image dans les parts: {data}"[:300]
+        return image_bytes, description, None
+    except Exception as e:
+        return None, None, str(e)[:300]
+
 async def edit_photo_with_gemini_image(photo_bytes: bytes, user_instructions: str):
     """Retouche RÉELLE de la photo — contrairement à Pollinations (texte -> nouvelle image
-    générée from scratch, donc incohérente avec l'original), Gemini 2.5 Flash Image (Nano
-    Banana) édite DIRECTEMENT les pixels de la photo fournie. La pose, le décor, l'identité
-    du sujet et le cadrage sont donc préservés — seuls les éléments demandés par le client
-    changent. C'est le fix pour le problème 'images incohérentes qui ne suivent pas le prompt'.
+    générée from scratch, donc incohérente avec l'original), Gemini Image (Nano Banana)
+    édite DIRECTEMENT les pixels de la photo fournie. La pose, le décor, l'identité du
+    sujet et le cadrage sont donc préservés — seuls les éléments demandés par le client
+    changent. On force l'usage de Gemini: on essaie CHAQUE modèle candidat avant
+    d'abandonner, aucun repli vers une génération texte->image non fiable.
 
-    Retourne (image_bytes, description_texte) ou (None, None) en cas d'échec."""
+    Retourne (image_bytes, description_texte) ou (None, None) si tous les modèles échouent."""
     b64_image = base64.b64encode(photo_bytes).decode("utf-8")
 
     edit_prompt = (
@@ -462,38 +510,15 @@ async def edit_photo_with_gemini_image(photo_bytes: bytes, user_instructions: st
         "Après l'image, ajoute UNE ligne en français décrivant ce qui a été changé."
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{
-            "role": "user",
-            "parts": [
-                {"text": edit_prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
-            ]
-        }],
-        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-    }
+    for model in GEMINI_IMAGE_MODELS:
+        image_bytes, description, error = await _call_gemini_image_model(model, edit_prompt, b64_image)
+        if image_bytes:
+            print(f"✅ Retouche réussie avec le modèle: {model}")
+            return image_bytes, description
+        print(f"⚠️ Modèle {model} a échoué: {error}")
 
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=60.0)
-            response.raise_for_status()
-            data = response.json()
-        parts = data["candidates"][0]["content"]["parts"]
-        image_bytes = None
-        description = None
-        for part in parts:
-            # L'API renvoie inlineData (camelCase) en JSON, mais on vérifie les deux
-            # variantes par sécurité selon la version d'API.
-            inline = part.get("inlineData") or part.get("inline_data")
-            if inline and inline.get("data"):
-                image_bytes = base64.b64decode(inline["data"])
-            elif part.get("text"):
-                description = part["text"].strip()
-        return image_bytes, description
-    except Exception as e:
-        print(f"⚠️ Erreur édition Gemini Image: {e}")
-        return None, None
+    print("❌ TOUS les modèles Gemini Image ont échoué pour cette retouche.")
+    return None, None
 
 async def analyze_photo_with_gemini(photo_bytes: bytes, user_instructions: str) -> str:
     """Utilise Gemini Vision pour analyser la photo uploadée et produire un prompt
@@ -635,27 +660,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(result_photo, caption=caption, reply_markup=reply_markup)
             return
 
-        # 3. Filet de sécurité: si l'édition Gemini échoue (quota, erreur réseau...),
-        # on retombe sur l'ancienne méthode Pollinations pour ne jamais laisser le
-        # client sans réponse — priorité à la stabilité du bot.
-        print("⚠️ Édition Gemini Image indisponible, repli sur Pollinations.")
-        generation_prompt = await analyze_photo_with_gemini(photo_bytes, user_instructions)
-        if not generation_prompt:
-            generation_prompt = f"{user_instructions}, high quality, professional, detailed, 4k, photorealistic"
-
-        image_url = f"https://image.pollinations.ai/prompt/{quote(generation_prompt[:1500])}?width=1024&height=1024&nologo=true&seed={abs(hash(generation_prompt)) % 1000000}"
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            response = await client.get(image_url, timeout=60.0)
-        response.raise_for_status()
-        result_photo = io.BytesIO(response.content)
-        result_photo.name = "komara_retouche.png"
-
-        fallback_description = await describe_retouche_result(user_instructions, generation_prompt)
-        caption = (
-            f"{fallback_description}\n\n⚠️ Résultat approximatif (mode secours). "
-            f"Contactez-nous pour un rendu garanti fidèle: {KNOWLEDGE['contact']['whatsapp']}"
+        # 3. Tous les modèles Gemini Image ont échoué (voir logs Railway pour la
+        # raison exacte de chacun). On ne retombe PLUS sur Pollinations pour la
+        # retouche: ça générait des images hors-sujet, sans rapport avec la photo
+        # du client — pire qu'une absence de réponse. On est honnête à la place.
+        print("❌ Retouche impossible: tous les modèles Gemini Image ont échoué.")
+        await update.message.reply_text(
+            "Désolé, la retouche n'a pas pu être réalisée pour le moment (service IA "
+            "temporairement indisponible). Réessayez dans 1-2 minutes, ou contactez "
+            f"directement un expert: {KNOWLEDGE['contact']['whatsapp']}",
+            reply_markup=reply_markup,
         )
-        await update.message.reply_photo(result_photo, caption=caption, reply_markup=reply_markup)
 
     except httpx.HTTPStatusError as e:
         print(f"⚠️ Erreur HTTP génération: {e}")
