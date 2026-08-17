@@ -14,6 +14,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# ID Telegram du propriétaire (toi, Ndine). Seul cet ID peut modifier le bot.
+# À définir dans les variables d'environnement Railway. Le bot se souvient
+# de l'ID du premier /start automatiquement si OWNER_ID n'est pas défini.
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 if not TELEGRAM_TOKEN:
     sys.exit("ERREUR: TELEGRAM_TOKEN manquant.")
@@ -97,10 +101,48 @@ menu_keyboard = [
 ]
 reply_markup = ReplyKeyboardMarkup(menu_keyboard, resize_keyboard=True)
 
+import asyncio as _asyncio
+
+THINKING_MESSAGES = [
+    "réflexions...", "analyse...", "je réfléchis...", "un instant...",
+    "je prépare ça...", "traitement...", "à l\'écoute...",
+]
+
 async def safe_reply(update: Update, text: str):
-    """Le prompt Gemini demande du **gras** — on essaie en Markdown, et si Telegram
-    rejette la syntaxe (caractères non échappés dans un prix/texte), on retombe sur
-    du texte brut plutôt que de planter silencieusement sans répondre."""
+    """Affiche un indicateur 'réflexion' pendant 1-3s (chat action + message éphémère)
+    avant d'envoyer la vraie réponse — donne l'impression d'une vraie réflexion humaine
+    plutôt que d'un déclenchement instantané robotique."""
+    import random as _r
+    thinking_msg = _r.choice(THINKING_MESSAGES)
+
+    # 1. Indicateur de frappe Telegram ("Bot is typing...")
+    try:
+        await update.get_bot().send_chat_action(
+            chat_id=update.effective_chat.id,
+            action="typing",
+        )
+    except Exception:
+        pass
+
+    # 2. Envoyer le message "réflexion..." éphémère
+    thinking = None
+    try:
+        thinking = await update.message.reply_text(thinking_msg, reply_markup=None)
+    except Exception:
+        pass
+
+    # 3. Attendre 1.5-3s pour simuler la réflexion (pas trop long, max 3s)
+    delay = _r.uniform(1.5, 3.0)
+    await _asyncio.sleep(delay)
+
+    # 4. Supprimer le message "réflexion..."
+    if thinking:
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+
+    # 5. Envoyer la vraie réponse (Markdown puis fallback texte brut)
     try:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception:
@@ -168,21 +210,62 @@ async def ask_gemini_with_knowledge(question: str) -> str:
     except Exception as e:
         return f"Désolé, une erreur est survenue. Contactez-nous directement: {KNOWLEDGE['contact']['whatsapp']}"
 
+def _is_owner(update: Update) -> bool:
+    """Vérifie si l'utilisateur qui parle est le propriétaire du bot."""
+    if not OWNER_ID:
+        return True  # Si OWNER_ID non configuré, on laisse passer (dev/test)
+    return update.effective_user and update.effective_user.id == OWNER_ID
+
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /admin — réservée au propriétaire. Affiche l'état et permet
+    de gérer le bot. Aucun autre utilisateur ne peut modifier quoi que ce soit."""
+    if not _is_owner(update):
+        await update.message.reply_text(
+            "Cette commande est réservée au propriétaire du bot. 🚫\n"
+            "Pour utiliser le bot: /start, /genere, /exemples",
+            reply_markup=reply_markup,
+        )
+        return
+    uid = update.effective_user.id
+    await update.message.reply_text(
+        f"Panel admin — KomaraBot\n\n"
+        f"Votre ID Telegram: {uid}\n"
+        f"Statut: Bot actif ✅\n"
+        f"Services: {len(KNOWLEDGE.get('services', []))} services\n"
+        f"Exemples: {len(_list_example_files())} visuels\n\n"
+        f"Pour configurer ce compte comme propriétaire, ajoutez dans les variables Railway:\n"
+        f"OWNER_ID={uid}\n\n"
+        f"Astuce: ajoutez le bot dans un groupe Telegram via le bouton \"Ajouter au groupe\" "
+        f"depuis le profil du bot (@{context.bot.username}). N'importe qui peut l'ajouter, "
+        f"mais seul vous pouvez le configurer.",
+        reply_markup=reply_markup,
+    )
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Première interaction: on retient l'ID du propriétaire si pas encore configuré
+    global OWNER_ID
+    if not OWNER_ID and update.effective_user:
+        OWNER_ID = update.effective_user.id
+        print(f"🔒 OWNER_ID auto-défini: {OWNER_ID} ({update.effective_user.full_name})")
+
     texte = f"""Salut! Je suis KomaraBot 🇬🇳
 Assistant officiel de {KNOWLEDGE['agence']}
 {KNOWLEDGE['slogan']}
 
-Je peux vous aider à:
+Ce que je fais:
 • Générer des images IA (/genere + description)
 • Retoucher vos photos (envoyez une photo + vos instructions)
-• Avoir un devis pour site web/logo
-• Connaître nos services
+• Donner un devis pour site web/logo
+• Présenter nos services
 
 Commandes:
 /genere + description → créer une image IA
 /exemples → voir nos réalisations
 Photo + texte → retoucher une photo
+/admin → panel propriétaire
+
+Ajoutez-moi dans un groupe Telegram pour que je sois accessible à tous!
+(@KomaraBot > Ajouter au groupe)
 
 Ou tapez sur un bouton ci-dessous 👇"""
     await update.message.reply_text(texte, reply_markup=reply_markup)
@@ -209,6 +292,17 @@ async def generate_and_send_image(update: Update, prompt: str):
     """Génère et envoie l'image en suivant STRICTEMENT le prompt du client —
     on n'y ajoute que des mots-clés de qualité, jamais de style imposé qui
     écraserait son intention réelle."""
+    # Indicateur de réflexion + chat action
+    try:
+        await update.get_bot().send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception:
+        pass
+    thinking = await update.message.reply_text("réflexion créative... 🎨", reply_markup=None)
+    await __import__("asyncio").sleep(2)
+    try:
+        await thinking.delete()
+    except Exception:
+        pass
     await update.message.reply_text("Création de votre visuel IA en cours... ⏳ 20s", reply_markup=reply_markup)
 
     # Pollinations.ai — gratuit, sans clé API. httpx async: rien ne bloque l'event loop.
@@ -511,6 +605,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # Indicateur de réflexion + chat action
+        try:
+            await update.get_bot().send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        except Exception:
+            pass
+        _thinking = await update.message.reply_text("analyse de votre photo... 📸", reply_markup=None)
+        await __import__("asyncio").sleep(2)
+        try:
+            await _thinking.delete()
+        except Exception:
+            pass
         await update.message.reply_text("Analyse de votre photo et retouche en cours... ⏳ 20-30s", reply_markup=reply_markup)
 
         # 1. Télécharger la photo depuis Telegram
@@ -662,6 +767,7 @@ def main():
     app.add_handler(CommandHandler("genere", genere))
     app.add_handler(CommandHandler("exemples", exemples))
     app.add_handler(CommandHandler("exemple", exemples))
+    app.add_handler(CommandHandler("admin", admin))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
     app.add_error_handler(error_handler)
