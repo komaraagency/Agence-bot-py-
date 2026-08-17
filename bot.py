@@ -134,15 +134,22 @@ async def ask_gemini_with_knowledge(question: str) -> str:
         "'/genere' suivi d'une description (ex: /genere affiche pour un restaurant africain moderne). "
         "Ne le renvoie JAMAIS vers un humain pour ça — c'est une fonctionnalité que TU as.\n\n"
         "MISSION:\n"
-        "1. Sois le meilleur commercial. Accueille, conseille, et vends les services.\n"
+        "1. Sois le meilleur commercial. Conseille et vends les services avec naturel.\n"
         "2. Réponds d'abord avec les infos de la BASE DE CONNAISSANCES.\n"
         "3. Si info manquante (hors démo image), dis: 'Je vous mets en contact avec un expert' et donne le WhatsApp.\n"
-        "RÈGLES:\n"
+        "RÈGLES DE TON — TRÈS IMPORTANT:\n"
+        "- Tu discutes avec un client qui te parle DÉJÀ, ce n'est pas un premier contact à chaque fois. "
+        "NE COMMENCE JAMAIS ta réponse par 'Bonjour', 'Bonjour !' ou toute formule de salutation — "
+        "c'est robotique et répétitif quand ça revient à chaque message. Va directement au fait, "
+        "comme le ferait un vrai commercial humain en pleine conversation.\n"
+        "- Écris comme une vraie personne compétente qui discute, pas comme un script figé qui se "
+        "présente ('En tant qu'assistant commercial...'). Varie tes formulations d'un message à l'autre.\n"
+        "- Ton chaleureux, direct, professionnel mais décontracté — pas corporate ni ampoulé.\n"
         "- Français professionnel, vouvoiement\n"
         "- Réponse courte, structurée avec **gras** et listes •\n"
         "- 2 émojis max\n"
-        "- Termine par un appel à l'action: 'Voulez-vous un devis?' ou 'Contact: +212701986219'\n"
-        "- Cite le slogan 1 fois sur 3"
+        "- Termine par un appel à l'action naturel: 'Voulez-vous un devis?' ou 'Contact: +212701986219'\n"
+        "- Cite le slogan 1 fois sur 3, jamais en ouverture de message"
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
@@ -475,8 +482,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Avec caption: analyse la photo + applique les instructions -> génère le résultat.
     Sans caption: demande ce que le client veut faire avec sa photo."""
     try:
+        if not await _should_respond_in_group(update, context):
+            return
+
         # Récupérer le texte (caption) s'il y en a un
-        user_instructions = update.message.caption or ""
+        user_instructions = _strip_bot_mention(update.message.caption or "", context.bot.username)
 
         if not user_instructions:
             await update.message.reply_text(
@@ -557,9 +567,37 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup,
         )
 
+def _strip_bot_mention(text: str, bot_username: str) -> str:
+    if bot_username:
+        text = text.replace(f"@{bot_username}", "").strip()
+    return text
+
+async def _should_respond_in_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """En groupe/canal, le bot ne répond QUE s'il est @mentionné ou si on répond
+    directement à l'un de ses messages — sinon il reste silencieux pour ne pas
+    polluer la conversation. En chat privé, il répond toujours."""
+    chat_type = update.effective_chat.type
+    if chat_type not in ("group", "supergroup"):
+        return True
+
+    bot_username = (context.bot.username or "").lower()
+    text = (update.message.text or update.message.caption or "").lower()
+    mentioned = bool(bot_username) and f"@{bot_username}" in text
+
+    is_reply_to_bot = bool(
+        update.message.reply_to_message
+        and update.message.reply_to_message.from_user
+        and update.message.reply_to_message.from_user.id == context.bot.id
+    )
+    return mentioned or is_reply_to_bot
+
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     try:
+        if not await _should_respond_in_group(update, context):
+            return
+        text = _strip_bot_mention(text, context.bot.username)
+
         # Si un menu /exemples est en attente pour ce client, on traite sa réponse
         # ici en priorité (un seul exemple envoyé), avant tout autre routage.
         if await handle_example_choice(update, context, text):
