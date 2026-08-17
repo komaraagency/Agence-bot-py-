@@ -4,6 +4,7 @@ import sys
 import json
 import base64
 import threading
+import random
 from urllib.parse import quote
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -248,7 +249,10 @@ async def exemples(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # Envoyer chaque image (max 5 pour éviter le spam)
-    for img_name in image_files[:5]:
+    # On mélange pour varier ce que les clients voient à chaque /exemples,
+    # et on limite à 6 pour ne pas spammer le chat.
+    random.shuffle(image_files)
+    for img_name in image_files[:6]:
         img_path = os.path.join(EXAMPLES_DIR, img_name)
         try:
             with open(img_path, "rb") as f:
