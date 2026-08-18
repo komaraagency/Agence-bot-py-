@@ -199,7 +199,9 @@ async def _call_gemini_text(payload: dict, timeout: float = 30.0):
                 return text, None
             last_error = f"Réponse 200 mais aucun texte: {data}"[:300]
         except Exception as e:
-            last_error = str(e)[:300]
+            # str(e) peut être vide pour certaines exceptions (ex: timeout) — on
+            # ajoute toujours le type pour ne jamais logger une ligne vide.
+            last_error = f"{type(e).__name__}: {str(e) or '(pas de message)'}"[:300]
             print(f"⚠️ Modèle texte {model} a échoué (exception): {last_error}")
     return None, last_error
 
@@ -522,7 +524,7 @@ async def _call_gemini_image_model(model: str, edit_prompt: str, b64_image: str)
             return None, None, f"Réponse 200 mais aucune image dans les parts: {data}"[:300]
         return image_bytes, description, None
     except Exception as e:
-        return None, None, str(e)[:300]
+        return None, None, f"{type(e).__name__}: {str(e) or '(pas de message)'}"[:300]
 
 async def edit_photo_with_gemini_image(photo_bytes: bytes, user_instructions: str):
     """Retouche RÉELLE de la photo — contrairement à Pollinations (texte -> nouvelle image
