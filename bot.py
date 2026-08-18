@@ -194,7 +194,10 @@ async def _call_gemini_text(payload: dict, timeout: float = 30.0):
                 continue
             data = response.json()
             parts = data["candidates"][0]["content"]["parts"]
-            text = "".join([p["text"] for p in parts if "text" in p]).strip()
+            # Les modèles Gemini "thinking" renvoient parfois des parts de
+            # raisonnement interne (thought=true) EN PLUS de la vraie réponse.
+            # On les ignore pour ne jamais exposer le raisonnement brut au client.
+            text = "".join([p["text"] for p in parts if p.get("text") and not p.get("thought")]).strip()
             if text:
                 return text, None
             last_error = f"Réponse 200 mais aucun texte: {data}"[:300]
@@ -518,7 +521,7 @@ async def _call_gemini_image_model(model: str, edit_prompt: str, b64_image: str)
             inline = part.get("inlineData") or part.get("inline_data")
             if inline and inline.get("data"):
                 image_bytes = base64.b64decode(inline["data"])
-            elif part.get("text"):
+            elif part.get("text") and not part.get("thought"):
                 description = part["text"].strip()
         if image_bytes is None:
             return None, None, f"Réponse 200 mais aucune image dans les parts: {data}"[:300]
