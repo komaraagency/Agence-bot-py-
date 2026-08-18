@@ -203,11 +203,16 @@ async def ask_gemini_with_knowledge(question: str) -> str:
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, timeout=30.0)
-            response.raise_for_status()
-            data = response.json()
+        if response.status_code != 200:
+            # On logue le VRAI message d'erreur de Google (quota, clé, modèle...)
+            # au lieu de l'avaler silencieusement — indispensable pour diagnostiquer.
+            print(f"⚠️ Gemini texte a échoué: HTTP {response.status_code}: {response.text[:500]}")
+            return f"Désolé, une erreur est survenue. Contactez-nous directement: {KNOWLEDGE['contact']['whatsapp']}"
+        data = response.json()
         parts = data["candidates"][0]["content"]["parts"]
         return "".join([p["text"] for p in parts if "text" in p]).strip()
     except Exception as e:
+        print(f"⚠️ Erreur ask_gemini_with_knowledge (exception): {e}")
         return f"Désolé, une erreur est survenue. Contactez-nous directement: {KNOWLEDGE['contact']['whatsapp']}"
 
 def _is_owner(update: Update) -> bool:
