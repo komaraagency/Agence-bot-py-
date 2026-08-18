@@ -163,6 +163,40 @@ def start_health_server():
     print(f"Health check server listening on port {port}")
     server.serve_forever()
 
+# Modèles Gemini texte testés dans l'ordre — Google déprécie/renomme ses modèles
+# régulièrement (ex: gemini-2.5-flash a été retiré, remplacé par gemini-3.6-flash).
+# On essaie plusieurs candidats au lieu de dépendre d'un seul nom figé.
+GEMINI_TEXT_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+]
+
+async def _call_gemini_text(payload: dict, timeout: float = 30.0):
+    """Appelle Gemini texte en essayant chaque modèle candidat jusqu'à ce qu'un
+    fonctionne. Retourne (texte, None) ou (None, error_str) si tous échouent."""
+    last_error = None
+    for model in GEMINI_TEXT_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, json=payload, timeout=timeout)
+            if response.status_code != 200:
+                last_error = f"HTTP {response.status_code}: {response.text[:300]}"
+                print(f"⚠️ Modèle texte {model} a échoué: {last_error}")
+                continue
+            data = response.json()
+            parts = data["candidates"][0]["content"]["parts"]
+            text = "".join([p["text"] for p in parts if "text" in p]).strip()
+            if text:
+                return text, None
+            last_error = f"Réponse 200 mais aucun texte: {data}"[:300]
+        except Exception as e:
+            last_error = str(e)[:300]
+            print(f"⚠️ Modèle texte {model} a échoué (exception): {last_error}")
+    return None, last_error
+
 async def ask_gemini_with_knowledge(question: str) -> str:
     knowledge_str = json.dumps(KNOWLEDGE, ensure_ascii=False, indent=2) if KNOWLEDGE else "{}"
 
@@ -194,26 +228,16 @@ async def ask_gemini_with_knowledge(question: str) -> str:
         "- Cite le slogan 1 fois sur 3, jamais en ouverture de message"
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"role": "user", "parts": [{"text": f"{system_prompt}\n\nQuestion du client: {question}"}]}],
         "generationConfig": {"temperature": 0.8, "maxOutputTokens": 1000},
     }
 
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=30.0)
-        if response.status_code != 200:
-            # On logue le VRAI message d'erreur de Google (quota, clé, modèle...)
-            # au lieu de l'avaler silencieusement — indispensable pour diagnostiquer.
-            print(f"⚠️ Gemini texte a échoué: HTTP {response.status_code}: {response.text[:500]}")
-            return f"Désolé, une erreur est survenue. Contactez-nous directement: {KNOWLEDGE['contact']['whatsapp']}"
-        data = response.json()
-        parts = data["candidates"][0]["content"]["parts"]
-        return "".join([p["text"] for p in parts if "text" in p]).strip()
-    except Exception as e:
-        print(f"⚠️ Erreur ask_gemini_with_knowledge (exception): {e}")
-        return f"Désolé, une erreur est survenue. Contactez-nous directement: {KNOWLEDGE['contact']['whatsapp']}"
+    text, error = await _call_gemini_text(payload, timeout=30.0)
+    if text:
+        return text
+    print(f"⚠️ ask_gemini_with_knowledge: tous les modèles ont échoué — {error}")
+    return f"Désolé, une erreur est survenue. Contactez-nous directement: {KNOWLEDGE['contact']['whatsapp']}"
 
 def _is_owner(update: Update) -> bool:
     """Vérifie si l'utilisateur qui parle est le propriétaire du bot."""
@@ -549,7 +573,6 @@ async def analyze_photo_with_gemini(photo_bytes: bytes, user_instructions: str) 
         "Réponds UNIQUEMENT avec le prompt en anglais, sans introduction ni explication."
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{
             "role": "user",
@@ -561,16 +584,11 @@ async def analyze_photo_with_gemini(photo_bytes: bytes, user_instructions: str) 
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 800},
     }
 
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=45.0)
-            response.raise_for_status()
-            data = response.json()
-        parts = data["candidates"][0]["content"]["parts"]
-        return "".join([p["text"] for p in parts if "text" in p]).strip()
-    except Exception as e:
-        print(f"⚠️ Erreur analyse Gemini Vision: {e}")
-        return None
+    text, error = await _call_gemini_text(payload, timeout=45.0)
+    if text:
+        return text
+    print(f"⚠️ Erreur analyse Gemini Vision: {error}")
+    return None
 
 async def describe_retouche_result(user_instructions: str, photo_description: str) -> str:
     """Génère une courte description en français de ce qui a été fait, style:
@@ -584,22 +602,16 @@ async def describe_retouche_result(user_instructions: str, photo_description: st
         "Format: description courte + une question d'amélioration."
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.6, "maxOutputTokens": 200},
     }
 
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=30.0)
-            response.raise_for_status()
-            data = response.json()
-        parts = data["candidates"][0]["content"]["parts"]
-        return "".join([p["text"] for p in parts if "text" in p]).strip()
-    except Exception as e:
-        print(f"⚠️ Erreur description retouche: {e}")
-        return "Retouche effectuée selon vos instructions."
+    text, error = await _call_gemini_text(payload, timeout=30.0)
+    if text:
+        return text
+    print(f"⚠️ Erreur description retouche: {error}")
+    return "Retouche effectuée selon vos instructions."
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gère les photos envoyées par le client — avec ou sans instructions en caption.
