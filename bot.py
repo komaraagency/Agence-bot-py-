@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import sys
 import json
 import base64
@@ -142,9 +143,14 @@ async def safe_reply(update: Update, text: str):
         except Exception:
             pass
 
-    # 5. Envoyer la vraie réponse (Markdown puis fallback texte brut)
+    # 5. Envoyer la vraie réponse. Telegram (mode Markdown legacy) attend *gras*
+    # en astérisque SIMPLE — mais Gemini écrit souvent **gras** (style CommonMark).
+    # Ce mélange fait planter/tronquer le parsing des entités. On normalise donc
+    # **texte** -> *texte* avant d'envoyer, avec repli en texte brut si ça échoue
+    # quand même (ex: astérisques non appariés dans le texte du client).
+    normalized_text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
     try:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.message.reply_text(normalized_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception:
         await update.message.reply_text(text, reply_markup=reply_markup)
 
@@ -215,14 +221,15 @@ async def ask_gemini_with_knowledge(question: str) -> str:
         "3. Si info manquante (hors démo image), dis: 'Je vous mets en contact avec un expert' et donne le WhatsApp.\n"
         "RÈGLES DE TON — TRÈS IMPORTANT:\n"
         "- Tu discutes avec un client qui te parle DÉJÀ, ce n'est pas un premier contact à chaque fois. "
-        "NE COMMENCE JAMAIS ta réponse par 'Bonjour', 'Bonjour !' ou toute formule de salutation — "
-        "c'est robotique et répétitif quand ça revient à chaque message. Va directement au fait, "
-        "comme le ferait un vrai commercial humain en pleine conversation.\n"
+        "NE COMMENCE JAMAIS ta réponse par 'Bonjour', une salutation, ou une question générique du "
+        "type 'Comment puis-je vous aider ?' / 'Comment puis-je vous aider aujourd'hui ?' — c'est "
+        "robotique et répétitif quand ça revient à chaque message. Réponds DIRECTEMENT à ce que le "
+        "client vient de dire, comme le ferait un vrai commercial humain en pleine conversation.\n"
         "- Écris comme une vraie personne compétente qui discute, pas comme un script figé qui se "
         "présente ('En tant qu'assistant commercial...'). Varie tes formulations d'un message à l'autre.\n"
         "- Ton chaleureux, direct, professionnel mais décontracté — pas corporate ni ampoulé.\n"
         "- Français professionnel, vouvoiement\n"
-        "- Réponse courte, structurée avec **gras** et listes •\n"
+        "- Réponse courte, structurée avec *gras* (UN SEUL astérisque de chaque côté, jamais deux) et listes •\n"
         "- 2 émojis max\n"
         "- Termine par un appel à l'action naturel: 'Voulez-vous un devis?' ou 'Contact: +212701986219'\n"
         "- Cite le slogan 1 fois sur 3, jamais en ouverture de message"
@@ -752,7 +759,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reponse = f"Parfait! Décrivez votre projet ici ou contactez directement notre équipe sur WhatsApp: {KNOWLEDGE['contact']['whatsapp_lien']}"
         elif text == "Contact":
             c = KNOWLEDGE['contact']
-            reponse = f"📞 **Contactez {KNOWLEDGE['agence']}**\n\nWhatsApp: {c['whatsapp']}\nEmail: {c['email']}\nAdresse: {c['adresse']}\nPortfolio: {c['portfolio']}\n\n{KNOWLEDGE['slogan']}"
+            reponse = f"📞 *Contactez {KNOWLEDGE['agence']}*\n\nWhatsApp: {c['whatsapp']}\nEmail: {c['email']}\nAdresse: {c['adresse']}\nPortfolio: {c['portfolio']}\n\n{KNOWLEDGE['slogan']}"
         elif text == "Portfolio":
             reponse = f"Découvrez nos réalisations ici 👇\n{KNOWLEDGE['contact']['portfolio']}"
         elif text == "Vidéo IA":
