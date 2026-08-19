@@ -6,6 +6,7 @@ import json
 import base64
 import threading
 import random
+from datetime import datetime
 from urllib.parse import quote
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -27,6 +28,246 @@ if not GEMINI_API_KEY:
 
 KNOWLEDGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge.json")
 EXAMPLES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")
+DEMANDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demandes_clients.json")
+
+def save_demande(demande: dict):
+    """Sauvegarde une demande client dans demandes_clients.json.
+    Le propriétaire peut consulter ce fichier dans le repo pour voir toutes les demandes."""
+    try:
+        demandes = []
+        if os.path.exists(DEMANDES_FILE):
+            with open(DEMANDES_FILE, "r", encoding="utf-8") as f:
+                demandes = json.load(f)
+        demande["date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        demandes.append(demande)
+        with open(DEMANDES_FILE, "w", encoding="utf-8") as f:
+            json.dump(demandes, f, ensure_ascii=False, indent=2)
+        print(f"✅ Demande sauvegardée: {demande.get('service', '?')} - {demande.get('phone', '?')}")
+    except Exception as e:
+        print(f"⚠️ Erreur sauvegarde demande: {e}")
+
+async def notify_owner_order(context: ContextTypes.DEFAULT_TYPE, demande: dict):
+    """Envoie une notification Telegram au propriétaire avec les détails de la commande."""
+    if not OWNER_ID:
+        return
+    msg = (
+        f"🔔 NOUVELLE COMMANDE\n\n"
+        f"Service: {demande.get('service', 'N/A')}\n"
+        f"Projet: {demande.get('details', 'N/A')}\n"
+        f"Tel client: {demande.get('phone', 'N/A')}\n"
+        f"Date: {demande.get('date', 'N/A')}\n"
+        f"Client TG: {demande.get('telegram_name', 'N/A')} (ID: {demande.get('telegram_id', 'N/A')})"
+    )
+    try:
+        await context.bot.send_message(chat_id=OWNER_ID, text=msg)
+    except Exception as e:
+        print(f"⚠️ Erreur notification propriétaire: {e}")
+
+async def describe_photo_with_gemini(photo_bytes: bytes) -> str:
+    """Décrit une photo en utilisant Gemini Vision (texte uniquement, pas de retouche).
+    Réponse stable et cohérente pour le client."""
+    b64_image = base64.b64encode(photo_bytes).decode("utf-8")
+
+    prompt = (
+        "Analyse cette image en détail. Décris ce que tu vois en français de façon précise et naturelle:\n"
+        "- Le sujet principal (personne, objet, scène)\n"
+        "- Le cadrage et la composition\n"
+        "- Les couleurs et la lumière\n"
+        "- L'arrière-plan / décor\n"
+        "- Le style et l'ambiance\n"
+        "- Tout texte visible dans l'image (retranscris-le)\n\n"
+        "Sois concis (5-8 lignes max), comme un photographe professionnel qui décrit une photo à un client. "
+        "N'ajoute PAS de remarque sur ce qu'il faudrait améliorer, juste une description factuelle."
+    )
+
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
+            ]
+        }],
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 500},
+    }
+
+    text, error = await _call_gemini_text(payload, timeout=30.0)
+    if text:
+        return text
+    print(f"⚠️ Erreur description photo: {error}")
+    return None
+
+async def start_order_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Démarre le processus de commande guidée — le bot agit comme un vrai vendeur."""
+    services = KNOWLEDGE.get("services", [])
+    if not services:
+        await update.message.reply_text(
+            "Services temporairement indisponibles. Contactez-nous directement.",
+            reply_markup=reply_markup,
+        )
+        return
+
+    lignes = [f"{i+1}. {s['nom']} — {s['prix']}" for i, s in enumerate(services)]
+    texte = (
+        "Parfait, je vais vous accompagner dans votre commande! 🛒\n\n"
+        "Quel service vous intéresse?\n\n"
+        + "\n".join(lignes)
+        + "\n\nRépondez avec le NUMÉRO du service (ex: 1).\n"
+        "Tapez 'annuler' à tout moment pour annuler."
+    )
+    context.user_data["order_state"] = "service"
+    context.user_data["order_data"] = {}
+    await update.message.reply_text(texte, reply_markup=reply_markup)
+
+async def handle_order_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """Gère le flux de commande conversationnel étape par étape.
+    Retourne True si le message a été traité (pour arrêter le routage normal)."""
+    state = context.user_data.get("order_state")
+    if not state:
+        return False
+
+    # Annulation à tout moment
+    if text.lower() in ("annuler", "cancel", "annulation", "menu", "retour"):
+        context.user_data.pop("order_state", None)
+        context.user_data.pop("order_data", None)
+        await update.message.reply_text(
+            "Commande annulée. Que puis-je faire d'autre pour vous?",
+            reply_markup=reply_markup,
+        )
+        return True
+
+    data = context.user_data.get("order_data", {})
+    services = KNOWLEDGE.get("services", [])
+
+    if state == "service":
+        chosen = None
+        # Choix par numéro
+        if text.strip().isdigit():
+            idx = int(text.strip()) - 1
+            if 0 <= idx < len(services):
+                chosen = services[idx]
+        # Choix par nom approximatif
+        if chosen is None:
+            lowered = text.lower()
+            for s in services:
+                if lowered in s["nom"].lower() or s["nom"].lower() in lowered:
+                    chosen = s
+                    break
+
+        if chosen is None:
+            await update.message.reply_text(
+                "Je n'ai pas reconnu ce service. Répondez avec le NUMÉRO "
+                "(ex: 1 pour " + services[0]["nom"] + ")",
+                reply_markup=reply_markup,
+            )
+            return True
+
+        data["service"] = chosen["nom"]
+        data["prix"] = chosen["prix"]
+        data["delai"] = chosen["delai"]
+        context.user_data["order_state"] = "details"
+        await safe_reply(update,
+            f"Excellent choix! *{chosen['nom']}* ({chosen['prix']})\n\n"
+            f"{chosen['description']}\n\n"
+            "Décrivez votre projet en quelques mots:\n"
+            "(ex: 'Je veux un site e-commerce pour vendre des vêtements')\n\n"
+            "Tapez 'annuler' pour annuler."
+        )
+        return True
+
+    elif state == "details":
+        if len(text.strip()) < 5:
+            await update.message.reply_text(
+                "Décrivez un peu plus votre projet pour qu'on puisse bien vous aider. 🙂",
+                reply_markup=reply_markup,
+            )
+            return True
+        data["details"] = text.strip()
+        context.user_data["order_state"] = "phone"
+        await update.message.reply_text(
+            "Parfait, j'ai noté votre projet. ✅\n\n"
+            "Maintenant, quel est votre numéro de téléphone (WhatsApp de préférence)?\n"
+            "Komara Agency vous contactera avec un devis personnalisé.\n\n"
+            "Tapez 'annuler' pour annuler.",
+            reply_markup=reply_markup,
+        )
+        return True
+
+    elif state == "phone":
+        phone = text.strip()
+        # Validation basique: au moins 6 caractères, contient des chiffres
+        digits = sum(c.isdigit() for c in phone)
+        if digits < 6:
+            await update.message.reply_text(
+                "Ce numéro semble trop court. Réessayez avec un numéro valide\n"
+                "(ex: +224 6XX XXX XXX ou +212 6XX XXX XXX).",
+                reply_markup=reply_markup,
+            )
+            return True
+
+        data["phone"] = phone
+        data["telegram_id"] = update.effective_user.id if update.effective_user else 0
+        data["telegram_name"] = update.effective_user.full_name if update.effective_user else "N/A"
+
+        # Récapitulatif
+        context.user_data["order_state"] = "confirm"
+        recap = (
+            "*Récapitulatif de votre commande*\n\n"
+            f"Service: {data.get('service', 'N/A')}\n"
+            f"Prix: {data.get('prix', 'N/A')}\n"
+            f"Délai estimé: {data.get('delai', 'N/A')}\n"
+            f"Votre projet: {data.get('details', 'N/A')}\n"
+            f"Votre numéro: {data.get('phone', 'N/A')}\n\n"
+            "Confirmez-vous cette commande?\n"
+            "Tapez *oui* pour confirmer, *non* pour annuler."
+        )
+        await update.message.reply_text(recap, reply_markup=reply_markup, parse_mode="Markdown")
+        return True
+
+    elif state == "confirm":
+        if text.lower().strip() in ("oui", "confirme", "confirmer", "ok", "yes", "o", "go"):
+            # Sauvegarder la demande dans le fichier
+            save_demande(data)
+            # Notifier le propriétaire via Telegram
+            await notify_owner_order(context, data)
+            # Générer un lien WhatsApp pour le client
+            wa_msg = (
+                f"Bonjour Komara Agency, je confirme ma commande:\n"
+                f"Service: {data.get('service', 'N/A')}\n"
+                f"Projet: {data.get('details', 'N/A')}\n"
+                f"Mon numéro: {data.get('phone', 'N/A')}"
+            )
+            wa_number = KNOWLEDGE['contact']['whatsapp'].replace('+', '').replace(' ', '')
+            wa_link = f"https://wa.me/{wa_number}?text={quote(wa_msg)}"
+
+            context.user_data.pop("order_state", None)
+            context.user_data.pop("order_data", None)
+
+            await update.message.reply_text(
+                f"Commande confirmée! ✅\n\n"
+                f"Komara Agency vous contactera très vite au {data.get('phone', 'N/A')}.\n\n"
+                f"Pour accélérer, cliquez ici pour nous écrire directement:\n{wa_link}\n\n"
+                f"{KNOWLEDGE['slogan']} 🚀",
+                reply_markup=reply_markup,
+            )
+            return True
+        elif text.lower().strip() in ("non", "annuler", "cancel", "n", "no"):
+            context.user_data.pop("order_state", None)
+            context.user_data.pop("order_data", None)
+            await update.message.reply_text(
+                "Commande annulée. Que puis-je faire d'autre pour vous?",
+                reply_markup=reply_markup,
+            )
+            return True
+        else:
+            await update.message.reply_text(
+                "Tapez *oui* pour confirmer ou *non* pour annuler.",
+                reply_markup=reply_markup,
+                parse_mode="Markdown",
+            )
+            return True
+
+    return False
 
 # Libellés lisibles pour chaque fichier d'exemple (utilisés dans le menu /exemples).
 # Fallback automatique sur le nom de fichier si un nouveau fichier n'est pas listé ici.
@@ -625,6 +866,49 @@ async def describe_retouche_result(user_instructions: str, photo_description: st
     print(f"⚠️ Erreur description retouche: {error}")
     return "Retouche effectuée selon vos instructions."
 
+async def _process_photo_retouche(update: Update, photo_bytes: bytes, user_instructions: str):
+    """Factorise la logique de retouche photo — utilisée par handle_photo
+    (photo + caption) et par handle_menu (choix 'retoucher' puis instructions)."""
+    # Vérifier les interdits
+    forbidden = ["mineur", "deepfake", "usurpation", "harcèlement", "violence", "gore"]
+    if any(w in user_instructions.lower() for w in forbidden):
+        await update.message.reply_text(
+            "Je ne peux pas traiter cette demande. Elle va à l'encontre de mes règles d'utilisation. "
+            "Je peux vous proposer une alternative sûre — décrivez votre besoin différemment. 🙏",
+            reply_markup=reply_markup,
+        )
+        return
+
+    # Indicateur de réflexion
+    try:
+        await update.get_bot().send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception:
+        pass
+    _thinking = await update.message.reply_text("analyse de votre photo... 📸", reply_markup=None)
+    await _asyncio.sleep(2)
+    try:
+        await _thinking.delete()
+    except Exception:
+        pass
+    await update.message.reply_text("Analyse de votre photo et retouche en cours... ⏳ 20-30s", reply_markup=reply_markup)
+
+    image_bytes, description = await edit_photo_with_gemini_image(photo_bytes, user_instructions)
+
+    if image_bytes:
+        result_photo = io.BytesIO(image_bytes)
+        result_photo.name = "komara_retouche.png"
+        caption = f"{description or 'Retouche effectuée selon vos instructions.'}\n\nVeux-tu une variante? Contactez-nous: {KNOWLEDGE['contact']['whatsapp']}"
+        await update.message.reply_photo(result_photo, caption=caption, reply_markup=reply_markup)
+        return
+
+    print("❌ Retouche impossible: tous les modèles Gemini Image ont échoué.")
+    await update.message.reply_text(
+        "Désolé, la retouche n'a pas pu être réalisée pour le moment (service IA "
+        "temporairement indisponible). Réessayez dans 1-2 minutes, ou contactez "
+        f"directement un expert: {KNOWLEDGE['contact']['whatsapp']}",
+        reply_markup=reply_markup,
+    )
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gère les photos envoyées par le client — avec ou sans instructions en caption.
     Avec caption: analyse la photo + applique les instructions -> génère le résultat.
@@ -637,69 +921,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_instructions = _strip_bot_mention(update.message.caption or "", context.bot.username)
 
         if not user_instructions:
+            # Photo sans instructions: télécharger et stocker en mémoire, puis proposer 2 options
+            photo_file = await update.message.photo[-1].get_file()
+            photo_bytes = bytes(await photo_file.download_as_bytearray())
+            context.user_data["last_photo_bytes"] = photo_bytes
+            context.user_data["photo_action"] = "awaiting_choice"
             await update.message.reply_text(
-                "📸 Photo reçue! Décrivez-moi ce que vous voulez faire avec:\n"
-                "• Changer le fond\n"
-                "• Retoucher la lumière/les couleurs\n"
-                "• Améliorer la qualité\n"
-                "• Changer de style\n"
-                "• Ajouter/supprimer un élément\n\n"
-                "Répondez simplement avec vos instructions.",
+                "📸 Photo reçue! Que voulez-vous faire?\n\n"
+                "1. Retoucher cette photo (fond, lumière, couleurs...)\n"
+                "2. Analyser / décrire cette photo\n\n"
+                "Répondez avec le NUMÉRO de votre choix (1 ou 2).",
                 reply_markup=reply_markup,
             )
             return
 
-        # Vérifier les interdits
-        forbidden = ["mineur", "deepfake", "usurpation", "harcèlement", "violence", "gore"]
-        if any(w in user_instructions.lower() for w in forbidden):
-            await update.message.reply_text(
-                "Je ne peux pas traiter cette demande. Elle va à l'encontre de mes règles d'utilisation. "
-                "Je peux vous proposer une alternative sûre — décrivez votre besoin différemment. 🙏",
-                reply_markup=reply_markup,
-            )
-            return
-
-        # Indicateur de réflexion + chat action
-        try:
-            await update.get_bot().send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        except Exception:
-            pass
-        _thinking = await update.message.reply_text("analyse de votre photo... 📸", reply_markup=None)
-        await __import__("asyncio").sleep(2)
-        try:
-            await _thinking.delete()
-        except Exception:
-            pass
-        await update.message.reply_text("Analyse de votre photo et retouche en cours... ⏳ 20-30s", reply_markup=reply_markup)
-
-        # 1. Télécharger la photo depuis Telegram
+        # Photo + instructions: retouche directe (factored function)
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = bytes(await photo_file.download_as_bytearray())
-
-        # 2. Retouche RÉELLE via Gemini 2.5 Flash Image — édite les pixels de la
-        # photo fournie au lieu de régénérer une image complètement différente.
-        # C'est la méthode prioritaire: elle suit fidèlement le prompt et préserve
-        # la photo originale (pose, décor, identité).
-        image_bytes, description = await edit_photo_with_gemini_image(photo_bytes, user_instructions)
-
-        if image_bytes:
-            result_photo = io.BytesIO(image_bytes)
-            result_photo.name = "komara_retouche.png"
-            caption = f"{description or 'Retouche effectuée selon vos instructions.'}\n\nVeux-tu une variante? Contactez-nous: {KNOWLEDGE['contact']['whatsapp']}"
-            await update.message.reply_photo(result_photo, caption=caption, reply_markup=reply_markup)
-            return
-
-        # 3. Tous les modèles Gemini Image ont échoué (voir logs Railway pour la
-        # raison exacte de chacun). On ne retombe PLUS sur Pollinations pour la
-        # retouche: ça générait des images hors-sujet, sans rapport avec la photo
-        # du client — pire qu'une absence de réponse. On est honnête à la place.
-        print("❌ Retouche impossible: tous les modèles Gemini Image ont échoué.")
-        await update.message.reply_text(
-            "Désolé, la retouche n'a pas pu être réalisée pour le moment (service IA "
-            "temporairement indisponible). Réessayez dans 1-2 minutes, ou contactez "
-            f"directement un expert: {KNOWLEDGE['contact']['whatsapp']}",
-            reply_markup=reply_markup,
-        )
+        await _process_photo_retouche(update, photo_bytes, user_instructions)
 
     except httpx.HTTPStatusError as e:
         print(f"⚠️ Erreur HTTP génération: {e}")
@@ -747,7 +986,94 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         text = _strip_bot_mention(text, context.bot.username)
 
-        # Si un menu /exemples est en attente pour ce client, on traite sa réponse
+        # 1. Si une commande est en cours, on gère le flux de commande en priorité
+        # (le bot joue le rôle de vendeur: choix service -> description -> tel -> confirmation)
+        if context.user_data.get("order_state"):
+            if await handle_order_flow(update, context, text):
+                return
+
+        # 2. Si une action photo est en attente (choix analyse vs retouche)
+        photo_action = context.user_data.get("photo_action")
+        if photo_action == "awaiting_choice":
+            choice = text.strip()
+            if choice == "1":
+                context.user_data["photo_action"] = "awaiting_retouche"
+                await update.message.reply_text(
+                    "Décrivez ce que vous voulez retoucher:\n"
+                    "(ex: 'change le fond en blanc', 'améliore la lumière', 'rend en noir et blanc')\n\n"
+                    "Tapez 'annuler' pour annuler.",
+                    reply_markup=reply_markup,
+                )
+                return
+            elif choice == "2":
+                # Analyser / décrire la photo
+                context.user_data.pop("photo_action", None)
+                # Récupérer la dernière photo stockée
+                last_photo = context.user_data.get("last_photo_bytes")
+                if last_photo:
+                    try:
+                        await update.get_bot().send_chat_action(chat_id=update.effective_chat.id, action="typing")
+                    except Exception:
+                        pass
+                    _thinking = await update.message.reply_text("analyse de votre photo... 📸", reply_markup=None)
+                    await _asyncio.sleep(2)
+                    try:
+                        await _thinking.delete()
+                    except Exception:
+                        pass
+                    description = await describe_photo_with_gemini(last_photo)
+                    context.user_data.pop("last_photo_bytes", None)
+                    if description:
+                        await safe_reply(update, f"📸 *Voici mon analyse de votre photo:*\n\n{description}")
+                    else:
+                        await update.message.reply_text(
+                            "Désolé, l'analyse a échoué pour le moment. Réessayez dans 1-2 minutes. 🙏",
+                            reply_markup=reply_markup,
+                        )
+                else:
+                    await update.message.reply_text(
+                        "Je n'ai plus la photo en mémoire. Renvoyez-la s'il vous plaît. 📸",
+                        reply_markup=reply_markup,
+                    )
+                return
+            elif choice.lower() in ("annuler", "cancel", "menu"):
+                context.user_data.pop("photo_action", None)
+                context.user_data.pop("last_photo_bytes", None)
+                await update.message.reply_text(
+                    "Annulé. Que puis-je faire d'autre pour vous?",
+                    reply_markup=reply_markup,
+                )
+                return
+            else:
+                await update.message.reply_text(
+                    "Répondez avec 1 (retoucher) ou 2 (analyser).",
+                    reply_markup=reply_markup,
+                )
+                return
+        elif photo_action == "awaiting_retouche":
+            if text.lower().strip() in ("annuler", "cancel", "menu"):
+                context.user_data.pop("photo_action", None)
+                context.user_data.pop("last_photo_bytes", None)
+                await update.message.reply_text(
+                    "Retouche annulée. Que puis-je faire d'autre pour vous?",
+                    reply_markup=reply_markup,
+                )
+                return
+            # Traiter comme instructions de retouche
+            context.user_data.pop("photo_action", None)
+            last_photo = context.user_data.get("last_photo_bytes")
+            if last_photo:
+                user_instructions = text.strip()
+                await _process_photo_retouche(update, last_photo, user_instructions)
+                context.user_data.pop("last_photo_bytes", None)
+            else:
+                await update.message.reply_text(
+                    "Je n'ai plus la photo en mémoire. Renvoyez-la s'il vous plaît. 📸",
+                    reply_markup=reply_markup,
+                )
+            return
+
+        # 3. Si un menu /exemples est en attente pour ce client, on traite sa réponse
         # ici en priorité (un seul exemple envoyé), avant tout autre routage.
         if await handle_example_choice(update, context, text):
             return
@@ -761,7 +1087,8 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif text == "Tarifs":
             reponse = await ask_gemini_with_knowledge("Donne la liste des tarifs de tous les services.")
         elif text == "Commander":
-            reponse = f"Parfait! Décrivez votre projet ici ou contactez directement notre équipe sur WhatsApp: {KNOWLEDGE['contact']['whatsapp_lien']}"
+            await start_order_flow(update, context)
+            return
         elif text == "Contact":
             c = KNOWLEDGE['contact']
             reponse = f"📞 *Contactez {KNOWLEDGE['agence']}*\n\nWhatsApp: {c['whatsapp']}\nEmail: {c['email']}\nAdresse: {c['adresse']}\nPortfolio: {c['portfolio']}\n\n{KNOWLEDGE['slogan']}"
