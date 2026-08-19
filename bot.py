@@ -420,9 +420,46 @@ GEMINI_TEXT_MODELS = [
     "gemini-2.0-flash",
 ]
 
+# Lignes/motifs typiques du "brouillon interne" d'un modèle thinking qui fuit
+# parfois DANS le texte final (pas seulement dans une part thought séparée).
+# On les découpe si elles apparaissent, par sécurité supplémentaire.
+_META_COMMENTARY_PATTERNS = [
+    r"^format check:?\s*$",
+    r"^drafting final text:?\s*$",
+    r"^draft:?\s*$",
+    r"^let me draft.*$",
+    r"^let me think.*$",
+    r"^wait,.*$",
+    r"^okay,? let me.*$",
+    r"^here'?s my (response|draft|answer).*$",
+    r"^révision:?\s*$",
+    r"^brouillon:?\s*$",
+]
+_META_COMMENTARY_RE = re.compile("|".join(_META_COMMENTARY_PATTERNS), re.IGNORECASE | re.MULTILINE)
+
+def _strip_meta_commentary(text: str) -> str:
+    """Filet de sécurité: supprime les lignes de raisonnement/brouillon interne
+    qui fuitent parfois dans le texte final malgré thinkingBudget=0 et le
+    filtrage des parts thought=true. Retire aussi les lignes vides en trop
+    laissées par la suppression."""
+    lines = text.split("\n")
+    cleaned = [ln for ln in lines if not _META_COMMENTARY_RE.match(ln.strip())]
+    result = "\n".join(cleaned)
+    result = re.sub(r"\n{3,}", "\n\n", result).strip()
+    return result if result else text  # ne jamais retourner une chaîne vide
+
 async def _call_gemini_text(payload: dict, timeout: float = 30.0):
     """Appelle Gemini texte en essayant chaque modèle candidat jusqu'à ce qu'un
     fonctionne. Retourne (texte, None) ou (None, error_str) si tous échouent."""
+    # On désactive le "thinking" étendu: pour un chatbot commercial, on ne veut
+    # QUE la réponse finale, jamais le raisonnement brut (qui a déjà fuité 2 fois
+    # dans le texte envoyé au client). Si un modèle du cascade ne supporte pas ce
+    # champ, il échouera proprement et on passera au modèle suivant automatiquement.
+    payload = dict(payload)
+    gen_config = dict(payload.get("generationConfig", {}))
+    gen_config.setdefault("thinkingConfig", {"thinkingBudget": 0})
+    payload["generationConfig"] = gen_config
+
     last_error = None
     for model in GEMINI_TEXT_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
@@ -439,6 +476,7 @@ async def _call_gemini_text(payload: dict, timeout: float = 30.0):
             # raisonnement interne (thought=true) EN PLUS de la vraie réponse.
             # On les ignore pour ne jamais exposer le raisonnement brut au client.
             text = "".join([p["text"] for p in parts if p.get("text") and not p.get("thought")]).strip()
+            text = _strip_meta_commentary(text)
             if text:
                 return text, None
             last_error = f"Réponse 200 mais aucun texte: {data}"[:300]
@@ -763,7 +801,7 @@ async def _call_gemini_image_model(model: str, edit_prompt: str, b64_image: str)
             if inline and inline.get("data"):
                 image_bytes = base64.b64decode(inline["data"])
             elif part.get("text") and not part.get("thought"):
-                description = part["text"].strip()
+                description = _strip_meta_commentary(part["text"].strip())
         if image_bytes is None:
             return None, None, f"Réponse 200 mais aucune image dans les parts: {data}"[:300]
         return image_bytes, description, None
