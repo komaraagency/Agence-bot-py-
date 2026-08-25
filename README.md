@@ -1,8 +1,8 @@
 # KomaraBot 🇬🇳
 **L'assistant IA officiel de Komara Agency**
 
-KomaraBot est un bot Telegram intelligent propulsé par Google Gemini 2.0 Flash.  
-Il répond aux clients, présente les services, génère des visuels IA et redirige vers WhatsApp pour les devis.
+KomaraBot est un bot Telegram intelligent propulsé par Google Gemini 2.5 Flash Image.  
+Il répond aux clients, présente les services, génère des visuels IA premium et redirige vers WhatsApp pour les devis.
 
 **Slogan : Vision. Impact. Excellence.**
 
@@ -10,10 +10,12 @@ Il répond aux clients, présente les services, génère des visuels IA et redir
 
 ## 🚀 Fonctionnalités
 
-- **Réponses intelligentes** : Répond aux questions en utilisant la base de connaissances `knowledge.json`
-- **Génération d'images IA** : Commande `/genere` pour créer des visuels 4K pour votre entreprise
-- **Menu interactif** : Boutons rapides pour Services, Tarifs, Contact, Portfolio
+- **Compréhension Naturelle** : Parlez normalement. Plus besoin de `/genere`. Ex: `fais moi un logo`
+- **Génération d'images IA 8K** : Texte OU Photo + Texte. Ex: `mets moi dans un bureau KOMARA luxe`
+- **Style KOMARA** : Tous les visuels respectent la VIBE : Noir + Or + Luxe + Photoréaliste
+- **Menu interactif** : Boutons rapides pour Services, Tarifs, Contact, Portfolio, Commander
 - **Infos Agence** : Présente Komara Agency, ses services et prix en GNF
+- **Système de Commandes** : Le bot prend les commandes et vous notifie sur Telegram
 - **Health Check** : Compatible Railway avec serveur HTTP sur le port $PORT
 - **Déploiement 24/7** : Tourne sur Railway sans interruption
 
