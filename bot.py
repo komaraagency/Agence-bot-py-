@@ -5,13 +5,10 @@ import sys
 import json
 import base64
 import threading
-import random
 from datetime import datetime
-from urllib.parse import quote
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import httpx
-import asyncio as _asyncio
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -53,7 +50,7 @@ async def save_demande(demande: dict):
         with open(DEMANDES_FILE, "w", encoding="utf-8") as f: json.dump(demandes, f, ensure_ascii=False, indent=2)
     except Exception as e: print(f"Erreur sauvegarde: {e}")
 
-# GÉNÉRATION IMAGE AVEC OU SANS PHOTO
+# FIX 1: BON NOM DE MODELE GEMINI
 async def generate_image_with_gemini(prompt: str, image_bytes: bytes = None):
     final_prompt = f"{SYSTEM_PROMPT}\n\nDEMANDE CLIENT: {prompt}"
     parts = [{"text": final_prompt}]
@@ -62,10 +59,11 @@ async def generate_image_with_gemini(prompt: str, image_bytes: bytes = None):
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64_image}})
 
     payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0.9}}
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key={GEMINI_API_KEY}"
+    # CHANGEMENT ICI: 2.5 -> 2.0-flash-exp
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={GEMINI_API_KEY}"
     
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client: # FIX 2: Timeout 120s pour images
             response = await client.post(url, json=payload)
             response.raise_for_status()
             data = response.json()
@@ -73,6 +71,8 @@ async def generate_image_with_gemini(prompt: str, image_bytes: bytes = None):
                 for part in candidate.get("content", {}).get("parts", []):
                     if "inline_data" in part: return base64.b64decode(part["inline_data"]["data"]), None
                     if "text" in part: return None, part["text"]
+    except httpx.HTTPStatusError as e: # FIX 3: Meilleur message d'erreur
+        return None, f"Erreur API: {e.response.status_code} - {e.response.text}"
     except Exception as e: return None, str(e)
     return None, "Aucune image générée"
 
@@ -96,27 +96,32 @@ async def start_order_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_order_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     state = context.user_data.get("order_state")
-    if state == "service" and text.isdigit():
-        idx = int(text) - 1
-        service = KNOWLEDGE['services'][idx]
-        context.user_data["order_data"] = {"service": service['nom']}
-        context.user_data["order_state"] = "details"
-        await safe_reply(update, f"Parfait: {service['nom']}. Décrivez votre projet:")
-    elif state == "details":
-        context.user_data["order_data"]["details"] = text
-        context.user_data["order_state"] = "phone"
-        await safe_reply(update, "Votre numéro WhatsApp:")
-    elif state == "phone":
-        data = context.user_data["order_data"]
-        data["phone"] = text
-        await save_demande(data)
-        await safe_reply(update, f"Commande reçue! ✅ Nous vous contactons au {text}")
+    try: # FIX 4: Anti-crash si mauvais numéro
+        if state == "service" and text.isdigit():
+            idx = int(text) - 1
+            service = KNOWLEDGE['services'][idx]
+            context.user_data["order_data"] = {"service": service['nom']}
+            context.user_data["order_state"] = "details"
+            await safe_reply(update, f"Parfait: {service['nom']}. Décrivez votre projet:")
+        elif state == "details":
+            context.user_data["order_data"]["details"] = text
+            context.user_data["order_state"] = "phone"
+            await safe_reply(update, "Votre numéro WhatsApp:")
+        elif state == "phone":
+            data = context.user_data["order_data"]
+            data["phone"] = text
+            await save_demande(data)
+            await safe_reply(update, f"Commande reçue! ✅ Nous vous contactons au {text}")
+            context.user_data.clear()
+    except (IndexError, KeyError):
+        await safe_reply(update, "Numéro invalide. Veuillez taper un numéro de la liste.")
         context.user_data.clear()
 
-# LE BOT COMPREND TOUT
+
+# LE BOT COMPREND TOUT: TEXTE + PHOTO
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("order_state"):
-        await handle_order_flow(update, context, update.message.text)
+        await handle_order_flow(update, context, update.message.text or "")
         return
 
     text = update.message.text if update.message.text else ""
@@ -126,6 +131,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_menu(update, context, text)
         return
     
+    # Si photo sans texte
+    if photo and text == "":
+        text = "améliore cette photo style KOMARA AGENCY, noir et or, luxe, 8K"
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     thinking = await update.message.reply_text("🎨 Je crée votre visuel KOMARA...")
 
